@@ -1,0 +1,137 @@
+#+title: Phase 2c — Move Shell (Panel Base, Layout, Mount, Slots)
+#+date: 2026-06-18
+#+phase: 2c (after 04; parallel with 05)
+
+Move the shared UI scaffolding — panel base class, layout types, DOM mount
+logic, and the editor slot — from ~lox-visualizer/~ to ~compiler-viz/~.
+
+Two targeted behavior changes land here:
+
+1. ~buildLayoutDOM~ accepts a ~rootClass~ option (default ~'lox-visualizer'~) so
+   a Python post can mount under a different CSS root without breaking the
+   cloxvis post.
+2. ~layout.ts~ sheds the hardwired Lox panel imports; ~createPanelRegistry~ is
+   removed and replaced by the shared factory added in 08.
+
+* Background
+
+~visualization-panel.ts~, ~layout.ts~, ~mount.ts~, and
+~slots/editor-slot.ts~ contain no Lox-specific rendering logic.  The only
+coupling is:
+
+- ~layout.ts~ imports the four Lox panel classes to wire ~createPanelRegistry~.
+- ~mount.ts~ hardcodes the root CSS class ~lox-visualizer~.
+- ~visualization-panel.ts~ imports types from ~lox-data.ts~ (fixed in 04).
+
+* Tasks
+
+** DONE Move ~visualization-panel.ts~
+   :PROPERTIES:
+   :files: app/src/compiler-viz/visualization-panel.ts (new),
+           app/src/lox-visualizer/visualization-panel.ts (stub)
+   :END:
+
+Move the file.  Update imports:
+
+- ~ConnectorLayer~ → ~@/compiler-viz/connector-layer~ (or keep old path via
+  05's stub — both work).
+- ~VizData~, ~VizDataStore~, ~VizSelection~ → ~@/compiler-viz/types~.
+
+Old path stub:
+
+#+begin_src typescript
+export * from '@/compiler-viz/visualization-panel';
+#+end_src
+
+** DONE Move ~layout.ts~ (strip panel imports)
+   :PROPERTIES:
+   :files: app/src/compiler-viz/layout.ts (new),
+           app/src/lox-visualizer/layout.ts (stub)
+   :END:
+
+Move everything *except* ~createPanelRegistry~:
+
+- Remove ~createPanelRegistry~ and its Lox panel class imports (~LexerPanel~,
+  ~AstPanel~, ~BytecodePanel~, ~ConsolePanel~, ~EditorSlot~) and
+  ~LOX_TOKEN_CATEGORY_MAP~ import.  These move to 08.
+- Keep: ~PanelKind~, ~LayoutRow~, ~VisualizerLayout~, ~MountOptions~,
+  ~PanelContext~, ~VizPanelFactory~, ~PanelRegistry~, ~PanelFactory~,
+  ~PanelInstance~, ~MountResult~, ~VisualizerSlot~, ~validateLayout~,
+  ~kindsInLayout~, ~layoutIncludes~, ~isPanelKind~, ~panelClass~,
+  ~panelShellId~, ~connectorLinesForLayout~, ~declareConnectors~,
+  ~createLayoutChildren~, ~parseDataLayout~, ~findEntryScript~,
+  ~mountOptionsFromScript~, class constants.
+- Update type imports to ~@/compiler-viz/types~.
+
+Old path stub:
+
+#+begin_src typescript
+export * from '@/compiler-viz/layout';
+// createPanelRegistry moved to lox-visualizer.ts (see 08)
+#+end_src
+
+~layout.test.ts~ and ~layout.test.ts~ import paths: update or move alongside.
+
+** DONE Move ~mount.ts~ and add ~rootClass~ option
+   :PROPERTIES:
+   :files: app/src/compiler-viz/mount.ts (new),
+           app/src/lox-visualizer/mount.ts (stub)
+   :END:
+
+Move the file.  Add a ~rootClass~ option to ~buildLayoutDOM~ and
+~mountVisualizer~:
+
+#+begin_src typescript
+export function buildLayoutDOM(
+    layout: VisualizerLayout,
+    options?: { rootClass?: string },
+): { root: HTMLElement; containers: Map<PanelKind, HTMLElement> } {
+    const rootClass = options?.rootClass ?? LOX_VISUALIZER_CLASS;
+    // … use rootClass instead of LOX_VISUALIZER_CLASS
+}
+#+end_src
+
+~mountVisualizer~ threads the option through from its ~MountOptions~ arg or a
+new optional second param — whichever is cleaner.
+
+Old path stub:
+
+#+begin_src typescript
+export * from '@/compiler-viz/mount';
+#+end_src
+
+Update ~mount.test.ts~ if it asserts specific CSS class names.
+
+** DONE Move ~slots/editor-slot.ts~
+   :PROPERTIES:
+   :files: app/src/compiler-viz/slots/editor-slot.ts (new),
+           app/src/lox-visualizer/slots/editor-slot.ts (stub)
+   :END:
+
+Move the file.  No logic changes.
+
+Old path stub:
+
+#+begin_src typescript
+export * from '@/compiler-viz/slots/editor-slot';
+#+end_src
+
+~slots/slots.test.ts~ can stay in place if its imports are satisfied via the
+stub; or move alongside.
+
+* Acceptance
+
+- ~compiler-viz/~ contains ~visualization-panel.ts~, ~layout.ts~, ~mount.ts~,
+  ~slots/editor-slot.ts~.
+- ~compiler-viz/layout.ts~ has no imports of Lox panel classes.
+- ~buildLayoutDOM~ accepts an optional ~rootClass~ with default
+  ~'lox-visualizer'~.
+- Old ~lox-visualizer/*~ paths are re-export stubs.
+- Vitest green.
+
+* Notes
+
+Parallel with [[file:05-compiler-viz-renderers.org][05]] — they touch non-overlapping files.
+
+~createPanelRegistry~ is intentionally left out; it moves in
+[[file:08-lox-adapter-thin.org][08]] as ~createDefaultPanelRegistry~ once panels have their new home (07).

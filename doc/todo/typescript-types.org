@@ -1,0 +1,149 @@
+#+title: TypeScript Types — Assessment and Tasks
+#+date: 2026-06-18
+#+TODO: TODO NEXT IN-PROGRESS WAITING | DONE CANCELLED
+
+Assessment of ~app/src/~ TypeScript types.  As of 2026-06-18 (post-fix pass):
+~make typecheck~ / ~npx tsc --noEmit~ reports *0 errors*.  ~npx vitest run~
+passes (72 tests).
+
+* Summary
+
+| Area | Status |
+|------+--------|
+| ~lib/store.ts~, ~lox-data.ts~, ~layout.ts~ | Clean, well-typed |
+| Panel layer | Clean; d3 ~panelSelection~ helper dedupes casts |
+| ~events.ts~, ~state/state.ts~ | ~ParserAction~, ~as const~ on ~NODE_TYPE~ / ~CHILD_TYPE~ |
+| ~ast.ts~, ~state/state.ts~ | Compile-clean |
+| ~lox-core.ts~ | Typed ~LoxEvents~; WASM stub via ~tsconfig paths~ |
+| Tooling | ~make typecheck~ added |
+
+Optional follow-ups remain: split app/test ~tsconfig~, per-node ~AstNode.attrs~
+maps, ~ParseStackEntry~ union for expression parsing, CI wiring.
+
+* Broken — must fix (~tsc~ errors) — DONE 2026-06-18
+
+** DONE Fix ~ast.ts~ d3 ~.node()~ return type
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/ast.ts, app/src/lox-visualizer/d3-utils.ts
+   :END:
+
+Added ~selectionNode()~ helper; used at all three call sites.
+
+** DONE Fix ~ast.ts~ attr ~.text()~ for ~string | string[]~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/ast.ts
+   :END:
+
+Filter ~name~ with ~typeof … === 'string'~; filter ~params~ with
+~Array.isArray~.
+
+** DONE Fix ~findNodeForOffset~ ~never~ inference
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/ast.ts
+   :END:
+
+Replaced outer ~let~ bindings with a ~best~ holder object mutated in ~walk()~.
+
+** DONE Guard ~parseExpression~ result before ~children.push~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/state/state.ts
+   :END:
+
+** DONE Remove ~AstNodeBuilder~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/ast.ts
+   :END:
+
+** DONE Tighten ~ParserEvent~ and action constants
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/events.ts, app/src/lox-visualizer/state/state.ts
+   :END:
+
+~PARSER_ACTIONS~ moved to ~events.ts~ with ~as const~ and ~ParserAction~ type;
+~NODE_TYPE~ / ~CHILD_TYPE~ use ~as const~ with exported ~NodeType~ /
+~ChildTypeName~.
+
+** DONE Type the WASM / ~d3.dispatch~ event boundary
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-core.ts, app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+~LoxEventHandlers~ / ~LoxEvents~; orchestrator handlers no longer cast payloads;
+~runSource~ typed as ~(source: string) => void~.
+
+** DONE WASM import typing (stub, not ambient ~.d.ts~)
+   :PROPERTIES:
+   :files:    app/src/types/lox-wasm-stub.ts, tsconfig.json, app/src/lox-visualizer/lox-core.ts
+   :END:
+
+Absolute URL imports cannot use ambient ~declare module~; ~tsconfig paths~ maps
+~/js/lox-visualizer/lox.js~ → stub for typecheck.  Vite still loads the real
+bundle at runtime (~external~ in ~vite.config.js~).
+
+** DONE ~LoxStateProps.stdout~ + dead code
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/state/state.ts
+   :END:
+
+~stdout: string[]~; removed commented ~Property~ class.
+
+** DONE ~LoxData~ vs ~ConsoleStore~ doc alignment
+   :PROPERTIES:
+   :files:    doc/todo/arch-refactor/03-lox-data.org
+   :END:
+
+** DONE Deduplicate d3 ~select(container)~ cast in panels
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/d3-utils.ts, panels/*
+   :END:
+
+~panelSelection(container)~ helper.
+
+** DONE Add ~make typecheck~
+   :PROPERTIES:
+   :files:    Makefile
+   :END:
+
+** DONE Split app vs test ~tsconfig~
+   :PROPERTIES:
+   :files:    tsconfig.json, tsconfig.test.json, Makefile
+   :END:
+
+~tsconfig.json~ — app sources only (~types: []~, excludes ~*.test.ts~).
+~tsconfig.test.json~ — extends app config, ~types: ["vitest/globals"]~,
+includes ~*.test.ts~ only.  ~make typecheck~ runs both.
+
+* Remaining — optional / deferred
+
+** TODO Replace ~ExtendedParserEvent~ with ~ParseStackEntry~ union
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/state/state.ts
+   :END:
+
+~isNode: false~ stack marker is still ad-hoc; defer until parser logic is
+stable.
+
+** TODO Strengthen ~AstNode.attrs~ typing
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/ast.ts, app/src/lox-visualizer/state/state.ts
+   :END:
+
+Per-node attr maps (~FunctionAttrs~, ~VarAttrs~, …).  Defer until parser
+behavior is trusted.
+
+** TODO Wire ~make typecheck~ into CI
+   :PROPERTIES:
+   :files:    Makefile, CI config (if any)
+   :END:
+
+** TODO ~Store.set~ ~update~ helper (optional)
+   :PROPERTIES:
+   :files:    app/src/lib/store.ts
+   :END:
+
+* Verification
+
+#+begin_example
+make typecheck       # 0 errors
+make test            # 72 passing
+#+end_example

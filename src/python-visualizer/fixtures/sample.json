@@ -1,0 +1,106 @@
+{
+  "source": "x = 1 + 2\nprint(x)",
+  "lexemes": [
+    { "tok_name": "NAME",   "text": "x",     "start": 0,  "length": 1 },
+    { "tok_name": "OP",     "text": "=",     "start": 2,  "length": 1 },
+    { "tok_name": "NUMBER", "text": "1",     "start": 4,  "length": 1 },
+    { "tok_name": "OP",     "text": "+",     "start": 6,  "length": 1 },
+    { "tok_name": "NUMBER", "text": "2",     "start": 8,  "length": 1 },
+    { "tok_name": "NAME",   "text": "print", "start": 10, "length": 5 },
+    { "tok_name": "PAREN",  "text": "(",     "start": 15, "length": 1 },
+    { "tok_name": "NAME",   "text": "x",     "start": 16, "length": 1 },
+    { "tok_name": "PAREN",  "text": ")",     "start": 17, "length": 1 }
+  ],
+  "ast": {
+    "type": "Module",
+    "childType": null,
+    "start": 0,
+    "attrs": {},
+    "children": [
+      {
+        "type": "Assign",
+        "childType": null,
+        "start": 0,
+        "attrs": {},
+        "children": [
+          {
+            "type": "Name",
+            "childType": "Target",
+            "start": 0,
+            "attrs": { "name": "x" },
+            "attrStarts": { "name": 0 },
+            "children": []
+          },
+          {
+            "type": "BinOp",
+            "childType": "Value",
+            "start": 4,
+            "attrs": {},
+            "children": [
+              {
+                "type": "Constant",
+                "childType": "Operand",
+                "start": 4,
+                "attrs": { "name": "1" },
+                "attrStarts": { "name": 4 },
+                "children": []
+              },
+              {
+                "type": "Constant",
+                "childType": "Operand",
+                "start": 8,
+                "attrs": { "name": "2" },
+                "attrStarts": { "name": 8 },
+                "children": []
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "Expr",
+        "childType": null,
+        "start": 10,
+        "attrs": {},
+        "children": [
+          {
+            "type": "Call",
+            "childType": "Expression",
+            "start": 10,
+            "attrs": {},
+            "children": [
+              {
+                "type": "Name",
+                "childType": "Callee",
+                "start": 10,
+                "attrs": { "name": "print" },
+                "attrStarts": { "name": 10 },
+                "children": []
+              },
+              {
+                "type": "Name",
+                "childType": "Argument",
+                "start": 16,
+                "attrs": { "name": "x" },
+                "attrStarts": { "name": 16 },
+                "children": []
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "chunks": {
+    "<module>": [
+      { "offset": 0,  "op": "LOAD_CONST",  "arg": 3, "constant": "3",      "src_start": 4 },
+      { "offset": 2,  "op": "STORE_NAME",             "constant": "x",      "src_start": 0 },
+      { "offset": 4,  "op": "LOAD_NAME",              "constant": "print",  "src_start": 10 },
+      { "offset": 8,  "op": "LOAD_NAME",              "constant": "x",      "src_start": 16 },
+      { "offset": 10, "op": "CALL",         "arg": 1,                        "src_start": 10 },
+      { "offset": 14, "op": "POP_TOP",                                        "src_start": 10 },
+      { "offset": 16, "op": "LOAD_CONST",             "constant": "None" },
+      { "offset": 18, "op": "RETURN_VALUE" }
+    ]
+  }
+}

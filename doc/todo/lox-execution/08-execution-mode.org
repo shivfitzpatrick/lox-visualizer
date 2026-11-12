@@ -1,0 +1,251 @@
+#+title: Execution Mode
+#+date: 2026-06-19
+#+phase: 4 (after 04, 05, 06)
+
+"Execution mode" is the concept that ties all playback-driven visuals together
+under a single gate.  Currently the yellow arrow and connector draw whenever
+=currentStep= is non-null; execution mode makes them conditional on the user
+explicitly engaging the playback controls.
+
+*Invariants:*
+- Yellow border on playback panel ↔ execution mode is active.
+- =bc-executing= row marker and =bc-exec → ast-exec= connector ↔ active.
+- Clicking the playback panel or any control inside it → enters execution mode.
+- Clicking anything else (other panel content, document background) → exits.
+- Panning the AST (drag gesture) does NOT exit execution mode.
+- In execution mode the AST viewport pans to the executing node without
+  touching =selectionStore= (the pan is execution-driven, not user-selection-driven).
+
+* Tasks
+
+** TODO 1. Add =active= to =ExecutionState=
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/execution.ts
+   :END:
+
+Add the field and default:
+
+#+begin_src typescript
+export interface ExecutionState {
+    steps: VmStep[];
+    prints: TaggedPrint[];
+    currentStep: number | null;
+    playing: boolean;
+    active: boolean;   // ← new
+}
+
+export const INITIAL_EXECUTION_STATE: ExecutionState = {
+    steps: [],
+    prints: [],
+    currentStep: null,
+    playing: false,
+    active: false,     // ← new
+};
+#+end_src
+
+Also update the =rerun()= reset in =lox-visualizer.ts= to include =active: false=
+so a fresh run starts inactive:
+
+#+begin_src typescript
+this.executionStore.set({ steps: [], prints: [], currentStep: null, playing: false, active: false });
+#+end_src
+
+** TODO 2. =PlaybackControls= — click activates, reflects active in CSS
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/panels/playback-controls.ts, static/css/lox-visualizer.css
+   :END:
+
+In =setUp=, after =buildDom=, attach a click handler on the =.playback-controls=
+div.  The div contains all the buttons and the scrub — clicks on children will
+bubble up to it:
+
+#+begin_src typescript
+this.controls.on('click', (event: MouseEvent) => {
+    event.stopPropagation();
+    this.executionStore.set({ active: true });
+});
+#+end_src
+
+Stopping propagation prevents the document-level click handler from immediately
+deactivating.  (The individual button handlers already set their own state before
+the event bubbles; the order is button handler → div handler → document handler
+but document is now blocked.)
+
+In =update()=, reflect =active= on the container element so CSS can style it:
+
+#+begin_src typescript
+const { steps, currentStep, playing, active } = this.executionStore.get();
+// existing size guard …
+panelSelection(this.container).classed('execution-active', active);
+#+end_src
+
+CSS — change the border colour when execution-active:
+
+#+begin_src css
+.lox-panel--playback.execution-active {
+    border-color: #f90;
+}
+#+end_src
+
+** TODO 3. =documentClickHandler= exits execution mode
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+Extend the existing handler to also clear =active=:
+
+#+begin_src typescript
+private documentClickHandler = () => {
+    this.selection.set({ selectedStart: null, selectedAstNode: null });
+    this.executionStore.set({ active: false });
+};
+#+end_src
+
+No other changes needed here — any click that reaches the document already
+cleared selection; now it also exits execution mode.  Clicks inside the
+playback panel never reach the document because =PlaybackControls= calls
+=stopPropagation= (task 2).
+
+** TODO 4. =BytecodePanel= — gate =bc-executing= and =bc-exec= anchor on =active=
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/panels/bytecode-panel.ts
+   :END:
+
+The store subscriber currently calls =setExecuting(chunk, offset)= unconditionally.
+Change it to check =active= first:
+
+#+begin_src typescript
+this.unsubExecution = this.executionStore.subscribe((state) => {
+    if (!state.active || state.currentStep === null) {
+        this.clearExecutingVisual();
+    } else {
+        const step = state.steps[state.currentStep];
+        this.setExecuting(step.chunk, step.offset);
+    }
+});
+#+end_src
+
+Also update the prime-on-setUp block to use the same condition, and
+=onDataChange='s re-apply block.
+
+Extract the visual clear into its own method =clearExecutingVisual()= so it can
+be called without overwriting =executingChunk=/=executingOffset= (we want to
+remember the position so it can be re-shown when the user re-enters execution
+mode):
+
+#+begin_src typescript
+// Removes DOM class and connector anchor; does NOT clear executingChunk/Offset.
+private clearExecutingVisual(): void {
+    panelSelection(this.container)
+        .selectAll('tr.bc-executing')
+        .classed('bc-executing', false);
+    this.connectors.setAnchor('bc-exec', null);
+}
+#+end_src
+
+Keep =setExecuting= for when we have a new chunk/offset to apply (it continues
+to update =executingChunk= and =executingOffset=).
+
+=refreshAnchor= should also gate on =active=:
+
+#+begin_src typescript
+const { active } = this.executionStore.get();
+if (active && this.executingChunk !== null && this.executingOffset !== null) {
+    // … set bc-exec anchor
+} else {
+    this.connectors.setAnchor('bc-exec', null);
+}
+#+end_src
+
+** TODO 5. =AstPanel= — gate exec highlight on =active=, pan when activated
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/panels/ast-panel.ts
+   :END:
+
+*Gate the highlight:*
+In the =executionStore= subscriber, guard on =active=:
+
+#+begin_src typescript
+this.unsubExecution = this.executionStore.subscribe((state) => {
+    if (!state.active || state.currentStep === null) {
+        this.clearExecHighlight();
+    } else {
+        this.applyExecHighlight(state.steps[state.currentStep]);
+    }
+});
+#+end_src
+
+*Pan to the executing node in execution mode:*
+When =active= becomes true (or step changes while active), we want the AST
+viewport to pan so the highlighted node is visible.  We do NOT want this to
+write =selectedStart= to =selectionStore=, because that would cause the bytecode
+panel to add a =bc-selected= highlight on top of =bc-executing=.
+
+Approach: add a boolean guard =skipNextHighlight= on =AstPanel=.  Set it before
+calling =this.handle?.(srcOffset)= inside =applyExecHighlight=; the =onHighlight=
+callback (in =onDataChange=) checks the guard and skips the =selectionStore.set=
+write if it is true, then resets the flag.
+
+#+begin_src typescript
+// in onDataChange, inside the onHighlight callback:
+(node, _el) => {
+    if (this.skipNextHighlight) {
+        this.skipNextHighlight = false;
+        return;
+    }
+    // … existing selectionStore.set and setAnchor calls
+},
+
+// in applyExecHighlight, after adding 'ast-executing' class:
+if (this.executionStore?.get().active && this.handle) {
+    this.skipNextHighlight = true;
+    this.handle(instr.srcOffset);   // pans viewport to the node
+}
+#+end_src
+
+The guard prevents the pan from propagating into =selectionStore= and avoids the
+double-highlight on the bytecode panel.
+
+Also gate =refreshAnchor='s =ast-exec= publish on =active=:
+
+#+begin_src typescript
+const active = this.executionStore?.get().active ?? false;
+if (active && this.execHighlightStart !== null) {
+    this.connectors.setAnchor('ast-exec', this.execAnchorRect());
+} else if (!active) {
+    this.connectors.setAnchor('ast-exec', null);
+}
+#+end_src
+
+** TODO 6. CSS — =bc-executing= and =.ast-executing= styles already exist
+   :PROPERTIES:
+   :files:    static/css/lox-visualizer.css
+   :END:
+
+The =tr.bc-executing td:first-child::before= rule and =.lox-panel--ast g.ast-executing
+rect= rule already exist from task 04.  No changes needed to those.
+
+Only addition: the =.lox-panel--playback.execution-active= border rule (covered in
+task 2).
+
+Verify visually that =bc-executing= and =bc-selected= don't conflict on the same
+row when a step is executing on a row that also matches the selected =srcOffset=.
+The order of CSS specificity should let =bc-executing= win (or de-select on
+execution-mode entry if needed — see note in task 3).
+
+** TODO 7. Manual verification
+   :PROPERTIES:
+   :END:
+
+Checklist:
+- [ ] Load page, run sample — playback controls appear, no yellow border yet.
+- [ ] Click the playback panel — border turns orange, bytecode ► arrow appears,
+  connector draws (if AST node is in view), AST pans to node.
+- [ ] Step forward/backward — AST pans to new node, connector follows.
+- [ ] Pan the AST manually (drag) — execution mode stays active, border stays.
+- [ ] Click a bytecode row — execution mode clears (border gone, ► gone), normal
+  bc-selected highlight appears, AST focus follows selection.
+- [ ] Click an AST node — same: execution mode clears, selection takes over.
+- [ ] Click empty space in any panel — execution mode clears.
+- [ ] Click playback panel again — re-enters execution mode, re-shows current step.
+- [ ] Rerun editor — execution mode resets (no stale yellow border).

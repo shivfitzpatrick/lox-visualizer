@@ -1,0 +1,131 @@
+#+TITLE: LSP Path Resolution Debugging Session
+#+DATE: 2026-03-13
+#+AUTHOR: Claude + Siobhan
+
+* Problem
+
+~typescript-language-server~ reported ~Cannot find module '#/lox-visualizer/lox-core'~
+(and all other ~#/~ path alias imports) in ~lox-visualizer-demo.ts~, in both
+Eglot and VS Code. ~tsc --noEmit~ had no such errors.
+
+* Initial tsconfig issues
+
+The original ~tsconfig.json~ had a bad combination:
+
+#+begin_src json
+{
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "node10"
+  }
+}
+#+end_src
+
+~node10~ is the legacy CommonJS resolver and is not the correct pairing for
+~module: "ESNext"~. For Vite projects the correct setting is
+~moduleResolution: "bundler"~ (introduced in TypeScript 5.0).
+
+The ~#/~ prefix is also reserved by Node.js for package subpath imports
+(defined in ~package.json~'s ~"imports"~ field). With ~node10~ mode TypeScript
+only uses ~paths~ for it, but the combination was still unreliable.
+
+** Fix applied
+Changed to ~moduleResolution: "bundler"~, removed ~baseUrl~, and made paths
+explicit:
+
+#+begin_src json
+{
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "paths": {
+      "@/*": ["./assets/js/*"]
+    }
+  },
+  "include": ["assets/js/**/*"]
+}
+#+end_src
+
+Alias also changed from ~#/~ to ~@/~ everywhere (tsconfig, vite.config.js,
+all import statements) to avoid the Node.js subpath-import reservation on ~#~.
+
+* Why tsc worked but the LSP didn't
+
+After fixing the tsconfig, ~tsc --traceResolution~ confirmed the ~@/~ aliases
+resolved correctly. But both Eglot and VS Code still showed the errors.
+
+** Diagnostic approach: talking directly to the LSP
+
+Two Python scripts were written to speak the LSP wire protocol
+(JSON-RPC over stdio with ~Content-Length~ headers) directly to
+~typescript-language-server~:
+
+- ~lsp_diag_test.py~ :: sends ~initialize~ + ~textDocument/didOpen~, collects
+  ~textDocument/publishDiagnostics~. Confirmed the server reproduced all the
+  ~TS2307 Cannot find module~ errors and that hover over the import returned
+  ~null~.
+
+- ~lsp_project_info.py~ :: uses the ~typescript.tsserverRequest~ workspace
+  command to send a raw ~projectInfo~ tsserver request for the file, which
+  returns the tsconfig path tsserver has actually associated with the file.
+
+** Root cause found
+
+The ~projectInfo~ response revealed:
+
+#+begin_src json
+{
+  "configFileName": "/mnt/home/siobhan/Code/project/active/goodskynet/assets/jsconfig.json"
+}
+#+end_src
+
+~tsserver~ searches upward from the open file's directory for a config file
+(~tsconfig.json~ or ~jsconfig.json~). Starting from
+~assets/js/lox-visualizer/~ it found ~assets/jsconfig.json~ *before* reaching
+the root ~tsconfig.json~, and stopped there.
+
+That ~jsconfig.json~ contained:
+
+#+begin_src json
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": { "*": ["*"] }
+  }
+}
+#+end_src
+
+No ~@/*~ mapping, no ~moduleResolution: "bundler"~ — so all ~@/~ imports
+failed.
+
+* Resolution
+
+** Immediate fix
+Delete ~assets/jsconfig.json~ (or make it ~{ "extends": "../tsconfig.json" }~).
+
+** Recommended structural fix
+This is a Hugo project and ~assets/~ is Hugo's domain (Hugo Pipes). The Vite
+app should move out of ~assets/~ entirely.
+
+Proposed layout:
+
+| Directory     | Owner       | Purpose                                    |
+|---------------+-------------+--------------------------------------------|
+| ~src/js/~     | Vite        | TypeScript source files                    |
+| ~assets/~     | Hugo        | Hugo Pipes (CSS, images, Hugo-managed JS)  |
+| ~public/js/~  | Vite output | Built JS served statically by Hugo         |
+
+Changes required when moving:
+- ~vite.config.js~: update ~root:~ and ~rollupOptions.input~ paths
+- ~tsconfig.json~: update ~include~ and ~paths~ values
+- ~package.json~: remove the now-invalid ~"imports"~ field (was added during
+  debugging, ~@/~ is not a valid key for Node.js subpath imports anyway)
+
+* Key facts about the project setup
+
+- Hugo project with Vite grafted on for the lox-visualizer widget
+- TypeScript 5.9.3 (workspace, in ~node_modules/typescript~)
+- ~typescript-language-server~ 5.1.3 (system, ~/usr/bin~)
+- Vite 8.x, ~root: 'assets/js'~, output to ~dist/js/~ and ~public/js/~
+- Built output committed to ~public/js/~ for Hugo to serve statically
+- claude --resume 77f281ce-2bfe-437c-bc37-1a51b7285ee2

@@ -1,0 +1,191 @@
+#+title: Phase 4c — Wire Pyodide into the Python Orchestrator
+#+date: 2026-06-18
+#+phase: 4c (after 12 and 13)
+
+Replace the Phase 3 fixture in ~python-visualizer.ts~ with live Pyodide
+output.  Add a loading state while Pyodide bootstraps, and route Python errors
+to the console panel.
+
+* Dependencies
+
+- [[file:12-py-emitter.org][12]] (emitter.py) — the script ~py-core.ts~ injects into Pyodide.
+- [[file:13-py-core.org][13]] (py-core.ts) — the ~loadPyCore~ / ~PyCore~ API.
+
+Both must be merged before starting this task.
+
+* Tasks
+
+** TODO Replace fixture with ~loadPyCore~ in ~python-visualizer.ts~
+   :PROPERTIES:
+   :files: app/src/python-visualizer/python-visualizer.ts
+   :END:
+
+Remove the fixture imports and replace ~run()~ with a Pyodide call.
+
+Remove:
+#+begin_src typescript
+import { deriveVizData, PYTHON_TOKEN_CATEGORY_MAP } from '@/python-visualizer/py-data';
+import sampleFixture from '@/python-visualizer/fixtures/sample.json';
+
+const FIXTURE_VIZ_DATA = deriveVizData(...);
+const FIXTURE_CONSOLE: ConsoleMessage[] = ...;
+#+end_src
+
+Add:
+#+begin_src typescript
+import { deriveVizData, PYTHON_TOKEN_CATEGORY_MAP } from '@/python-visualizer/py-data';
+import { loadPyCore } from '@/python-visualizer/py-core';
+import type { PyCore } from '@/python-visualizer/py-core';
+#+end_src
+
+Add ~pyCore: PyCore | null = null~ as a private field.
+
+Change ~setUp()~:
+
+#+begin_src typescript
+async setUp() {
+    setupStyles('/css/lox-visualizer.css');
+    super.setUp();
+
+    this.setLoading(true);
+    try {
+        this.pyCore = await loadPyCore();
+    } catch (e) {
+        this.pushError(`Pyodide failed to load: ${String(e)}`);
+        this.setLoading(false);
+        return;
+    }
+    this.setLoading(false);
+
+    window.addEventListener('resize', this.refreshHandler);
+    window.addEventListener('scroll', this.refreshHandler);
+    document.addEventListener('click', this.documentClickHandler);
+
+    this.run(this.getEditorText());
+}
+#+end_src
+
+Change ~run()~:
+
+#+begin_src typescript
+run(source?: string) {
+    if (!this.pyCore) return;
+    const text = source ?? this.getEditorText();
+    this.selection.set({ selectedStart: null, selectedAstNode: null });
+
+    const result = this.pyCore.run(text);
+    if (!result.ok) {
+        publishConsoleMessages(this.consoleStore, [{ type: 'error', text: result.error }]);
+        this.dataStore.set({ data: null });
+        return;
+    }
+
+    this.dataStore.set({ data: deriveVizData(result.data) });
+    const consoleMsgs: ConsoleMessage[] = (result.data.console ?? []).map((m) =>
+        m.type === 'print'
+            ? { type: 'print' as const, text: m.text, srcOffset: m.src_offset }
+            : { type: 'error' as const, text: m.text },
+    );
+    publishConsoleMessages(this.consoleStore, consoleMsgs);
+}
+#+end_src
+
+~getEditorText()~: look up the ~EditorSlot~ in children the same way
+~LoxVisualizer~ does (filter ~children~ by ~instanceof EditorSlot~), or keep
+track of a ~private editor: EditorSlot | null~ in the constructor.
+
+Update ~onRun~ callback in ~fromPage~:
+#+begin_src typescript
+onRun: (text) => instance!.run(text),
+#+end_src
+
+** TODO Add loading state
+   :PROPERTIES:
+   :files: app/src/python-visualizer/python-visualizer.ts,
+           static/css/lox-visualizer-demo.css
+   :END:
+
+While Pyodide is loading, the editor should show a disabled state and the
+Run button should be visually inert.
+
+Simple approach: add a CSS class to the visualizer root and style it:
+
+#+begin_src typescript
+private setLoading(loading: boolean) {
+    this.root.classList.toggle('py-loading', loading);
+}
+#+end_src
+
+Add to ~static/css/lox-visualizer-demo.css~:
+
+#+begin_src css
+.py-loading .lox-run-button {
+    opacity: 0.4;
+    pointer-events: none;
+}
+.py-loading .lox-run-button::after {
+    content: ' (loading…)';
+    font-size: 0.8em;
+}
+#+end_src
+
+Store ~mountResult.root~ as ~this.root~ in the constructor so ~setLoading~
+can reach it.
+
+** TODO Handle Python errors in the console panel
+   :PROPERTIES:
+   :files: app/src/python-visualizer/python-visualizer.ts
+   :END:
+
+~py-core.ts~ returns ~{ ok: false, error: string }~ for Python
+~SyntaxError~, runtime exceptions, and Pyodide internal errors.  The ~run()~
+method above already handles this by calling:
+
+#+begin_src typescript
+publishConsoleMessages(this.consoleStore, [{ type: 'error', text: result.error }]);
+this.dataStore.set({ data: null });
+#+end_src
+
+Setting ~data: null~ clears the lexer/AST/bytecode panels (they check for
+~null~ and render nothing).  The error message appears in the console panel in
+red (~console-error~ class, already wired in ~ConsolePanel~).
+
+Add a private helper to keep it concise:
+#+begin_src typescript
+private pushError(text: string) {
+    publishConsoleMessages(this.consoleStore, [{ type: 'error', text }]);
+}
+#+end_src
+
+** TODO Browser smoke test
+   :PROPERTIES:
+   :files: (browser)
+   :END:
+
+Run ~make serve~ and navigate to the Python post.
+
+1. On page load: Run button shows "(loading…)".
+2. After Pyodide bootstraps (~3–10 seconds on first load): loading state
+   clears, panels populate with the ~x = 1 + 2 / print(x)~ output.
+3. Edit source to ~print("hello")~ and click Run:
+   - Lexer shows ~print~, ~(~, ~"hello"~, ~)~ with correct colors.
+   - AST shows ~Module → Expr → Call~.
+   - Bytecode shows ~<module>~ chunk.
+4. Enter broken Python (~x = ) and click Run:
+   - Console panel shows a red SyntaxError message.
+   - Other panels clear.
+5. Click an AST node — connector line appears to lexer panel.
+6. Click a bytecode row — connector line appears to AST panel.
+
+* Acceptance
+
+- Page loads without JS errors in the console (other than Pyodide's own logs).
+- Live Python output (not fixture) shown after Pyodide loads.
+- Python SyntaxError displayed in console panel, does not crash the page.
+- Connector lines work between all panel pairs.
+- ~vitest run~ 93/93 (this task adds no new tests).
+
+* Notes
+
+Depends on [[file:12-py-emitter.org][12]] and [[file:13-py-core.org][13]].  After this task, Phase 4 is complete.
+Phase 5 covers CSS rename and editor Python syntax mode.

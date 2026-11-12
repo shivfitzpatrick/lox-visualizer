@@ -1,0 +1,225 @@
+#+title: Dropdown UI — EditorSlot Changes and Styling
+#+date: 2026-08-11
+#+phase: 1 (parallel with 02; integrates after both)
+#+TODO: TODO NEXT IN-PROGRESS WAITING | DONE CANCELLED
+
+Decision (2026-08-11): a *styled native ~<select>~*, not a custom
+~<details>~ menu.  Free keyboard/mobile/a11y behaviour; the open list
+can't be fully styled but the closed control matches the app.
+
+* Design
+
+** Where the type and data flow live
+
+~EditorSlot~ is in ~app/src/compiler-viz/~ — the language-agnostic
+kit — so it must not import ~@/lox-visualizer/samples~.  Instead:
+
+- ~export interface SampleProgram { label: string; load(): Promise<string>; }~
+  next to ~PanelContext~ in ~app/src/compiler-viz/layout.ts~
+- ~PanelContext~ gains optional ~samples?: SampleProgram[]~
+- ~createDefaultPanelRegistry~ (~layout.ts:301-304~) threads it:
+  ~new EditorSlot(container, ctx.initialDoc, ctx.onRun, ctx.samples)~
+- ~lox-visualizer.ts~ supplies ~loxSamples~ when building the context
+- Python visualizer passes nothing → no dropdown rendered.  It can opt
+  in later with its own list.
+
+** EditorSlot
+
+~app/src/compiler-viz/slots/editor-slot.ts~:
+
+- Constructor gains ~private samples?: SampleProgram[]~ (4th param,
+  optional — existing tests/registry calls stay valid).
+- New method (also useful beyond this feature):
+  #+begin_src typescript
+    setText(text: string): void {
+        this.editorView.dispatch({
+            changes: { from: 0, to: this.editorView.state.doc.length, insert: text },
+        });
+    }
+  #+end_src
+- In ~setUp()~, when ~samples?.length~, build the picker *before*
+  ~.lox-editor-box~ (editor-slot.ts:31) inside ~.lox-editor-container~,
+  so the DOM order is picker / editor box / Build button:
+  #+begin_src typescript
+    const picker = editorContainer.append('label')
+        .classed('lox-sample-picker', true);
+    picker.append('span')
+        .classed('lox-sample-picker__label', true)
+        .text('Sample');
+    const select = picker.append('select')
+        .classed('lox-sample-picker__select', true);
+    select.append('option')
+        .attr('value', '')
+        .attr('selected', '')
+        .attr('disabled', '')
+        .text('Choose a sample…');
+    for (const [i, s] of this.samples.entries()) {
+        select.append('option').attr('value', String(i)).text(s.label);
+    }
+    select.on('change', (event) => this.onSampleChange(event));
+  #+end_src
+- Selection handler — async, replaces editor contents unconditionally
+  (per the overview; a dirty-editor confirm is explicitly out of
+  scope for now):
+  #+begin_src typescript
+    private async onSampleChange(event: Event): Promise<void> {
+        const el = event.currentTarget as HTMLSelectElement;
+        const entry = this.samples?.[Number(el.value)];
+        if (!entry) return;
+        try {
+            this.setText(await entry.load());
+        } catch (e) {
+            console.error('lox-visualizer: failed to load sample', entry.label, e);
+        }
+    }
+  #+end_src
+  Failure mode is a failed dynamic-chunk import (offline / stale
+  deploy); log and leave the editor untouched.
+- The placeholder option represents the page-scraped initial doc
+  (~content/visualizers.md~'s fenced block stays the initial editor
+  content — unchanged).  It is ~disabled~ so it can't be re-selected;
+  going "back" to the page sample is not a requirement.
+- Guard against a race: selecting sample A then quickly B — track a
+  request token (or compare ~el.value~ after ~await~) so a slow A
+  can't clobber B.  Cheap to do, cheap to test.
+
+** Styling
+
+~static/css/lox-visualizer.css~ (runtime-injected; do not touch
+~public/~).  Match the closed control to the app: ~JetBrains Mono~,
+background ~#242930~ (or menu surface ~#1a1f27~), ~1px solid #444~,
+~border-radius: 8px~, text ~#f8f8f0~, label text muted ~#aaa~,
+~min-height: 44px~ tap target, hover border ~#56b5c2~ +
+~rgba(86,181,194,0.15)~ like ~.playback-controls button~, and a
+~:focus-visible~ outline consistent with the rules near line 696.
+~appearance: none~ plus an inline-SVG chevron background for the
+arrow.  Style ~option~ background/color too (respected by
+Firefox/Chromium enough to avoid white-on-white).
+
+The picker sits in its own row above ~.lox-editor-box~, so the box's
+~border-radius: 20px 20px 0 0~ (css line 165) stays as is.
+
+* Tasks
+
+** DONE ~SampleProgram~ type + ~PanelContext.samples~ threading
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/layout.ts, app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+** DONE ~EditorSlot.setText~ + picker DOM + change handler
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/slots/editor-slot.ts
+   :END:
+
+** DONE CSS
+   :PROPERTIES:
+   :files:    static/css/lox-visualizer.css
+   :END:
+
+** DONE Tests
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/slots/slots.test.ts
+   :END:
+
+jsdom + chai ~assert~, constructing ~EditorSlot~ directly like the
+existing tests.  Samples are injected, so tests pass fake loaders —
+no ~.lox~ fixtures or glob involvement:
+
+- no ~samples~ arg → no ~.lox-sample-picker~ in the container
+  (regression guard for the Python visualizer)
+- with 2 fake samples → select renders placeholder + 2 options,
+  placeholder selected and disabled
+- set ~select.value = '1'~, dispatch ~change~, flush microtasks →
+  ~getText()~ returns the fake's text
+- loader that rejects → editor text unchanged, no unhandled rejection
+- slow loader A then fast B → editor shows B (race guard)
+- ~setText~/~getText~ round-trip
+
+** TODO Browser verification
+   :PROPERTIES:
+   :files:    —
+   :END:
+
+~make dev~ (restarted) + hugo server: dropdown looks native to the
+app in Firefox and Chromium, keyboard-operable, selecting each of the
+five samples swaps the editor text and Build runs it.
+
+* Done when
+
+On ~/visualizers~, a styled select sits above the editor; picking a
+sample replaces the editor contents; the Python visualizer page is
+unchanged; ~make typecheck~ and the slot tests pass.
+
+* Outcome (2026-08-11)
+
+Landed per the design; browser verification still open (above).
+
+** Revised same day: picker moved out of EditorSlot
+
+Placing the picker inside the editor pane made the Source and Lexer
+boxes misalign: on desktop/tablet ~.lox-visualizer-app~ is a grid with
+~.lox-visualizer-row~ as ~display: contents~, so the picker's height
+pushed the editor pane down relative to its neighbour.
+
+New shape:
+
+- ~app/src/compiler-viz/sample-picker.ts~ — standalone ~SamplePicker~
+  component (owns the ~SampleProgram~ type now; ~samples/index.ts~
+  imports it from there).  Constructor
+  ~(container, samples, onSelect: (text) => void)~; same placeholder,
+  race guard, and catch-and-log semantics as before.
+- ~buildLayoutDOM~ (~mount.ts~) appends an always-present, empty
+  ~.lox-sample-picker-bar~ div between the pane-switcher mount and
+  ~.lox-visualizer-app~ — above the grid, so its height can't skew
+  pane alignment.
+- ~fromPage~ mounts a ~SamplePicker~ into the bar only when the layout
+  actually contains an editor slot, wiring ~onSelect~ to
+  ~editorSlot.setText~.  Python visualizer: bar stays empty
+  (zero-height — margins live on ~.lox-sample-picker~, not the bar).
+- ~EditorSlot~ reverted to its lean form; keeps ~setText~.
+  ~PanelContext.samples~ removed again.
+- CSS: picker capped at ~max-width: 24em~ so it doesn't stretch
+  across the app; row margin matches ~.lox-visualizer-row~ (0.75em).
+- Tests: picker tests moved to
+  ~app/src/compiler-viz/sample-picker.test.ts~ (six, asserting the
+  ~onSelect~ contract); ~slots.test.ts~ keeps the ~setText~
+  round-trip; ~mount.test.ts~ asserts the bar exists directly before
+  the app grid.
+
+** Revised same day (2): default selection + Empty entry
+
+The picker now starts on the sample matching the editor's initial
+content instead of a placeholder: ~SamplePicker~ takes an optional
+~initialLabel~ 4th arg and marks that option selected, rendering the
+disabled placeholder only when no label matches (fallback for layouts
+whose page code block diverges from every sample).
+~samples/index.ts~ exports ~DEFAULT_SAMPLE_LABEL = 'Loop printer'~,
+which ~fromPage~ passes through.
+
+An ~Empty~ entry was added at the top of ~loxSamples~ — a literal
+~{label: 'Empty', load: () => Promise.resolve('')}~, no ~.lox~ file
+or chunk — selecting it clears the editor.  Tests updated: six
+entries in ~index.test.ts~ (Empty loads to ~''~), two new picker
+tests for initial selection and the placeholder fallback.
+
+- Implemented as designed: ~SampleProgram~ + optional
+  ~PanelContext.samples~ in ~layout.ts~, threaded as ~EditorSlot~'s
+  optional 4th constructor arg; ~setText~; picker rendered before
+  ~.lox-editor-box~ only when samples are present; async change
+  handler with a ~loadToken~ race guard and catch-and-log on a failed
+  chunk import.  ~lox-visualizer.ts~ passes ~loxSamples~; the Python
+  visualizer passes nothing.
+- CSS block added after the ~.lox-run-button~ rules: ~appearance:
+  none~ select with an inline-SVG chevron, ~#242930~/~#444~/8px to
+  match the app, ~#56b5c2~ hover + focus-visible ring, dark ~option~
+  background (~#1a1f27~).
+- Six new tests in ~slots.test.ts~ as specced (no-picker guard,
+  option rendering, selection replaces text, failed load leaves text,
+  race guard, setText round-trip).  ~make typecheck~ clean; vitest
+  left to the running watcher.
+- Chunk emission confirmed from the watch build (closing 02's
+  deferred task): each ~.lox~ is its own chunk at the top of
+  ~app/dist/~ (~/app/loop_printer.js~ …), and the entry lazy-imports
+  them as ~../<name>.js~, which resolves correctly from
+  ~/app/lox-visualizer/lox-visualizer.js~.  Same location as the
+  pre-existing shared ~pane-switcher.js~ chunk.

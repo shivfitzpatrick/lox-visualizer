@@ -1,0 +1,182 @@
+#+TITLE: IN PROGRESS: Compiler Event Protocol Exploration
+#+DATE: 2026-03-16
+This is a document for working out the protocol.
+
+
+This document describes the events that clox logs which enable the
+compiler's workings to be visualized. 
+
+* msg_type: lexer
+#+begin_src javascript
+  {
+    "msg_type": "lexer",
+  }
+#+end_src
+
+* msg_type: parser
+#+begin_src javascript
+  {
+    "msg_type": "parser",
+  }
+#+end_src
+
+workshoppin simple
+#+begin_src javascript
+  { node_type: 'Expression', action: 'open' },
+  { action: 'open_expression' },
+  { node_type: 'Number', action: 'expression_node', children: 0 },
+  { node_type: 'Number', action: 'expression_node', children: 0 },
+  { node_type: 'Number', action: 'expression_node', children: 0 },
+  { node_type: 'Binary', action: 'expression_node', children: 2 },
+  { node_type: 'Binary', action: 'expression_node', children: 2 },
+  { action: 'close_expression' },
+  { node_type: 'Expression', action: 'close' },
+
+  { node_type: 'Number', action: 'expression_node', children: [] },
+  { node_type: 'Number', action: 'expression_node', children: [] },
+  { node_type: 'Number', action: 'expression_node', children: [] },
+  { node_type: 'Binary', action: 'expression_node', children: ['operand', 'operand'] },
+  { node_type: 'Binary', action: 'expression_node', children: ['operand', 'operand'] },
+
+  function processNodeStack(nodeStack) {
+      let node = nodeStack.pop();
+      let realNode = makeANode();
+      while (node.children.length) {
+  	realNode.children.push(processNodeStack(nodeStack));
+      }
+
+      return realNode;
+  }
+
+  let rootNode;
+  let parentNode;
+  let currentNode;
+
+  while (nodes.length) {
+      currentNode = nodes.pop();
+
+      // is this the root?
+      // how many children?
+      // if children eat
+      // if not children, done
+
+      if (!parentNode) {
+  	parentNode = currentNode;
+  	continue;
+      }
+
+      let nextNode = nodes.pop();
+      nextNode.childType = currentNode.children.pop();
+      currentNode 
+  }
+
+  return rootNode;
+
+  { action: 'open_expression' },
+  { node_type: 'Number', action: 'expression_node' },
+  { node_type: 'Number', action: 'expression_node' },
+  { node_type: 'Number', action: 'expression_node' },
+  { action: 'expression_child', value: 'Operand'},
+  { action: 'expression_child', value: 'Operand'},
+  { node_type: 'Binary', action: 'expression_node' },
+  { action: 'expression_child', value: 'Operand'},
+  { action: 'expression_child', value: 'Operand'},
+  { node_type: 'Binary', action: 'expression_node' },
+  { action: 'close_expression' },
+
+
+  { action: 'open' },
+  { action: 'open_expression' },
+  { node_type: 'Variable', action: 'expression_node', children: 0 },
+  { action: 'open_expression' },
+  { node_type: 'Number', action: 'expression_node', children: 0 },
+  { action: 'close_expression' },
+  { action: 'open_expression' },
+  { node_type: 'Number', action: 'expression_node', children: 0 },
+  { action: 'close_expression' },
+  { action: 'expression_child', value: 'callee'},
+  { action: 'expression_child', value: 'argument'},
+  { action: 'expression_child', value: 'argument'},
+  { node_type: 'Call', action: 'expression_node', children: 3 },
+  { action: 'close_expression' },
+  { action: 'close' },
+
+
+
+  { action: 'open' },
+  { action: 'open_expression' },
+  { node_type: 'Variable', action: 'expression_node', children: 0 },
+  { node_type: 'Number', action: 'expression_node', children: 0 },
+  { node_type: 'Number', action: 'expression_node', children: 0 },
+  { action: 'expression_child', value: 'callee'},
+  { action: 'expression_child', value: 'argument'},
+  { action: 'expression_child', value: 'argument'},
+  { node_type: 'Call', action: 'expression_node', children: 3 },
+  { action: 'close_expression' },
+  { action: 'close' },
+
+
+
+  nodes = [];
+  children = [];
+
+  for (event of events) {
+      switch (event.action) {
+  	case 'open_expression':
+  	// recurse new node, push
+  	break;
+  	case 'close_expression':
+  	// end recurse node
+  	break;
+  	case 'expression_child':
+  	// push children
+  	break;
+  	case 'expression_node':
+  	// push node into nodes, mark children
+  	break;
+      }
+  }
+
+  nodes = [
+  { node_type: 'Variable', action: 'expression_node', children: 0 },
+  { node_type: 'Number', action: 'expression_node', children: [] },
+  { node_type: 'Number', action: 'expression_node', children: [] }, // Real node
+  { node_type: 'Call', action: 'expression_node', children: ['argument', 'argument', 'callee']}, // Real node!
+  ];
+
+  // what do you want?
+#+end_src
+
+workshoppin
+#+begin_src javascript
+  // stack
+  [
+      { msg_type: 'parser', node_type: 'Expression', action: 'open', start: 0 },
+      { msg_type: 'parser', action: 'open_expression', start: 0 },
+      { msg_type: 'parser', node_type: 'Variable', action: 'expression_node', start: 0, children: 0 },
+      { msg_type: 'parser', action: 'open_expression', start: 2 },
+      { msg_type: 'parser', node_type: 'Number', action: 'expression_node', start: 2, children: 0 },
+      { msg_type: 'parser', action: 'close_expression', start: 3 },
+      { msg_type: 'parser', action: 'open_expression', start: 4 },
+      { msg_type: 'parser', node_type: 'Number', action: 'expression_node', start: 4, children: 0 },
+      { msg_type: 'parser', action: 'close_expression', start: 5 },
+      { msg_type: 'parser', node_type: 'Call', action: 'expression_node', start: 5, children: 3 },
+      { msg_type: 'parser', action: 'close_expression', start: 6 },
+      { msg_type: 'parser', node_type: 'Expression', action: 'close', start: 6 },
+  ]
+
+  [
+      { action: 'open' },
+      { action: 'open_expression' },
+      { node_type: 'Variable', action: 'expression_node', children: 0 },
+      { action: 'open_expression' },
+      { node_type: 'Number', action: 'expression_node', children: 0 },
+      { action: 'close_expression' },
+      { action: 'open_expression' },
+      { node_type: 'Number', action: 'expression_node', children: 0 },
+      { action: 'close_expression' },
+      { node_type: 'Call', action: 'expression_node', children: 3 },
+      { action: 'close_expression' },
+      { action: 'close' },
+  ]
+#+end_src

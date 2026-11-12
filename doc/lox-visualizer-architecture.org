@@ -1,0 +1,308 @@
+#+title: Lox Visualizer Architecture
+#+date: 2026-06-18
+
+* Current state
+
+** What exists
+
+| Layer | File(s) | Responsibility |
+|---|---|---|
+| WASM bridge | =lox-core.ts= | Loads WASM, provides =events= dispatcher and =runSource= |
+| Event accumulation + derivation | =state/state.ts= | Collects raw WASM events; =lex()=, =parse()=, =compile()= derive structured data |
+| AST renderer | =ast.ts= | d3 tree, internal zoom/pan state, returns =focusByStart= |
+| Bytecode renderer | =bytecode.ts= | Stateless d3 table; takes =onClick= callback |
+| Connector overlay | =connector.ts= | Module-level singleton SVG overlay; keyed connector lines |
+| Everything else | =lox-visualizer-demo.ts= | WASM lifecycle, editor, render triggers, all UI state, cross-panel wiring |
+
+** Problems
+
+*** LoxVisualizer does too many things at once
+The class manages: the WASM instance, the CodeMirror editor, event
+accumulation → render sequencing, all interaction state, cross-panel
+coordination, and global event listener cleanup. None of these can be extracted
+or reused without untangling the others.
+
+*** The selection model is six scattered mutable properties
+#+begin_src typescript
+highlightedNode: AstNode | null
+highlightedEl: Element | null
+highlightedSpans: HTMLElement[]
+bcHighlightEls: Element[]
+selectedInstr: { offset: number; el: HTMLElement } | null
+focusByStart: ((start: number) => void) | null
+#+end_src
+
+Nothing enforces consistency across these. There is no single thing you can
+read to know "what is currently selected."
+
+*** Cross-panel logic is interleaved
+=onHighlight= does three things; =onInstructionClick= does four. Both methods
+know about all three panels. Adding a fourth panel means modifying both.
+
+*** connector.ts is a module-level singleton
+Only one connector overlay can exist per page. Two visualizer instances would
+collide.
+
+*** The Component children system is unused
+=LoxVisualizer= calls =Component.prototype.setUp/tearDown= explicitly as a
+formality but never places anything in =children=.
+
+* Direction
+
+The following reflects the desired design:
+
+1. A reactive store tracks the conceptual state of the visualization — things
+   derived from the compiler output, not DOM nodes.
+2. Each panel subscribes to the store and updates its own rendering when state
+   changes.
+3. After updating, panels register their current anchor rect with a scoped
+   connector layer. The connector layer draws lines between all registered
+   anchors according to a declared topology.
+4. Connector layers are not singletons — each visualizer instance owns one.
+5. Panels share a common base class extending =Component= with consistent
+   container rendering, lifecycle, and store wiring. Each panel is
+   interchangeable via a shared interface so the layout can reorganize them
+   freely.
+
+** Layout
+
+The post supplies only a sample code block (~ ```nil … ``` ~) and a module
+script tag. ~LoxVisualizer.fromPage()~ finds that block, replaces the ~<pre>~
+with a ~.lox-visualizer~ root, and builds pane shells into configurable rows
+(~VisualizerLayout~ in ~layout.ts~). The default cloxvis layout is: row 1 =
+editor + lexer; each of AST, bytecode, and console on its own row. Which panes
+appear and how rows are composed is set at the module entry (or per-post via a
+custom ~fromPage({ layout })~ call). See ~doc/todo/arch-refactor/09–14.org~ for
+the full layout refactor sequence.
+
+** The store
+
+The store holds values that are conceptually meaningful across the whole
+visualization — source offsets that came from the compiler, not DOM state.
+
+#+begin_src typescript
+interface VisualizerSelection {
+    // The source offset currently selected. This is the shared key that all
+    // panels understand — it comes from parser/compiler events.
+    selectedStart: number | null;
+
+    // The full AST node at selectedStart (needed by the lexer panel to
+    // highlight the subtree, not just the primary token).
+    selectedAstNode: AstNode | null;
+}
+
+interface Store<T> {
+    get(): T;
+    set(patch: Partial<T>): void;
+    subscribe(fn: (state: T) => void): () => void;  // returns unsubscribe
+}
+#+end_src
+
+The store is ~25 lines of plain TypeScript — no library needed. Each panel
+receives a reference to the store at construction time and subscribes in its
+=setUp=, unsubscribes in its =tearDown=.
+
+Panels write to the store when the user interacts with them (clicking a node,
+clicking a bytecode row). They read from the store when another panel causes a
+state change. This means panels never call each other's APIs directly.
+
+** Anchor registration and the connector layer
+
+When a panel handles a store update, it may have a new DOM element that should
+be connected to elements in other panels. Instead of the panel drawing the
+connector itself (which would require it to know about the other panel), it
+registers a rect with the connector layer.
+
+#+begin_src typescript
+class ConnectorLayer {
+    constructor(container: Element) {}
+
+    // Declare a connection between two named anchors. Called once at setup.
+    addLine(fromId: string, toId: string, color: string): void;
+
+    // Called by a panel after it updates its DOM to reflect new state.
+    // Passing null clears that anchor and hides any lines involving it.
+    setAnchor(panelId: string, rect: DOMRect | null): void;
+
+    // Redraws all lines whose both endpoints are currently set.
+    // Called automatically by setAnchor.
+    redraw(): void;
+
+    // Call on resize/scroll.
+    refresh(): void;
+
+    destroy(): void;
+}
+#+end_src
+
+Typical panel flow on a store update:
+
+#+begin_src typescript
+// Inside AstPanel.onSelectionChange:
+if (state.selectedStart !== null) {
+    this.focusByStart(state.selectedStart);  // animates to node
+    // After animation resolves:
+    const rect = this.getSelectedNodeRect();
+    this.connectors.setAnchor('ast', rect);
+} else {
+    this.connectors.setAnchor('ast', null);
+}
+#+end_src
+
+The connector layer is instantiated once per visualizer, not globally:
+
+#+begin_src typescript
+const connectors = new ConnectorLayer(visualizerRootEl);
+connectors.addLine('ast', 'lexer', colors.highlight);
+connectors.addLine('ast', 'bc', colors.highlight);
+#+end_src
+
+Adding a new panel means registering its anchor id and declaring which
+existing panels it connects to. No existing panel code changes.
+
+*** Open question: ordering when more than two panels share an anchor
+
+Currently only pairs are connected. If a third panel registers an anchor for
+the same selection, the declared =addLine= pairs determine which lines appear —
+not automatic all-to-all. This is intentional: the topology is declared
+explicitly at setup time and doesn't change based on which panels happen to
+register. If the design later calls for automatic chaining across all
+registered panels, =ConnectorLayer= can add that as an option.
+
+** Panel base class
+
+Each main visualization window extends =VisualizationPanel=, which extends the
+existing =Component=.
+
+#+begin_src typescript
+abstract class VisualizationPanel extends Component {
+    abstract readonly panelId: string;
+
+    constructor(
+        protected container: HTMLElement,
+        protected store: Store<VisualizerSelection>,
+        protected connectors: ConnectorLayer,
+    ) {
+        super();
+    }
+
+    setUp() {
+        this.renderContainer();   // draws shared border/chrome
+        this.unsubscribe = this.store.subscribe(s => this.onSelectionChange(s));
+        super.setUp();
+    }
+
+    tearDown() {
+        this.unsubscribe?.();
+        super.tearDown();
+    }
+
+    // Panels implement this to respond to selection changes and
+    // call this.connectors.setAnchor(this.panelId, rect) when done.
+    abstract onSelectionChange(state: VisualizerSelection): void;
+
+    // Panels implement this to (re-)render when new compiler output arrives.
+    abstract onDataChange(data: LoxData): void;
+
+    // Shared border/container rendering lives here.
+    // Controls padding, border-radius, the white border — things all panels share.
+    private renderContainer() { /* ... */ }
+
+    private unsubscribe?: () => void;
+}
+#+end_src
+
+Because all panels implement the same =onDataChange= and =onSelectionChange=
+interface, the orchestrator can treat them uniformly:
+
+#+begin_src typescript
+for (const panel of this.panels) {
+    panel.onDataChange(loxData);
+}
+#+end_src
+
+This matters for the planned layout reorganization: panels can be swapped in
+and out, reordered, or conditionally shown without changing any panel's
+internal logic.
+
+The existing =Component= children mechanism can now be used properly — the
+orchestrator puts its panels in =children= and gets setUp/tearDown propagation
+for free.
+
+** The orchestrator
+
+With panels managing their own state and connectors handling their own wiring,
+the orchestrator shrinks to four responsibilities:
+
+1. Create the WASM instance and run source
+2. Accumulate WASM events into =LoxState= and call =panel.onDataChange()= at
+   the right times
+3. Create the store, connector layer, and panels
+4. Handle the editor and re-run
+
+#+begin_src typescript
+class LoxVisualizer extends Component {
+    private store = createStore<VisualizerSelection>({ selectedStart: null, selectedAstNode: null });
+    private connectors = new ConnectorLayer(this.root);
+    private panels: VisualizationPanel[];
+
+    constructor(private root: HTMLElement) {
+        const lexer  = new LexerPanel(root.querySelector('#lox-lexer'),  store, connectors);
+        const ast    = new AstPanel(root.querySelector('#lox-ast'),       store, connectors);
+        const bc     = new BytecodePanel(root.querySelector('#lox-compiler'), store, connectors);
+        super([lexer, ast, bc]);
+        this.panels = [lexer, ast, bc];
+
+        connectors.addLine('ast', 'lexer', colors.highlight);
+        connectors.addLine('ast', 'bc',    colors.highlight);
+    }
+
+    async setUp() {
+        this.lox = await createLox();
+        // wire WASM events → loxState → panel.onDataChange()
+        // wire editor
+        super.setUp();  // propagates to panel children
+    }
+}
+#+end_src
+
+** File layout after refactor
+
+#+begin_example
+app/src/
+  lib/
+    component.ts          (unchanged)
+    store.ts              (new — createStore, ~25 lines)
+    styles.ts             (unchanged)
+  lox-visualizer/
+    connector-layer.ts    (replaces connector.ts — scoped class, not singleton)
+    visualization-panel.ts (new — VisualizationPanel base class)
+    lox-data.ts           (new — LoxData type, extracted from LoxState)
+    panels/
+      ast-panel.ts        (new — wraps ast.ts)
+      lexer-panel.ts      (new — wraps displayLex)
+      bytecode-panel.ts   (new — wraps bytecode.ts)
+    lox-visualizer.ts     (was lox-visualizer-demo.ts — orchestrator only)
+    state/
+      state.ts            (mostly unchanged, LoxState stays here)
+      token.ts            (unchanged)
+    ast.ts                (mostly unchanged)
+    bytecode.ts           (mostly unchanged)
+    connector.ts          (deleted after migration)
+    events.ts             (unchanged)
+    lox-core.ts           (unchanged)
+#+end_example
+
+* What does not need to change
+
+- =lox-core.ts= is already clean and reusable.
+- =ast.ts= and =bytecode.ts= work well as pure rendering functions. =drawAst=
+  will return a richer object (focus handle + selection rect getter) but its
+  internals stay the same.
+- =state/state.ts= event accumulation and derivation logic is fine. =LoxState=
+  can remain mostly as-is; the boundary is just that the orchestrator creates
+  it and passes derived data to panels rather than panels accessing it directly.
+- The CSS and HTML structure in the post do not need to change.
+- No new framework is needed. The store is plain TypeScript. The panel
+  hierarchy extends the existing =Component=. d3 stays inside the rendering
+  functions where it already lives.

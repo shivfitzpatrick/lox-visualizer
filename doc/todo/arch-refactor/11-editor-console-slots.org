@@ -1,0 +1,135 @@
+#+title: Editor and Console Slots
+#+date: 2026-06-18
+#+phase: 4b (after 09 — parallel with 10 and 12)
+
+Extract the editor and console UI from the orchestrator into mountable
+~Component~ slots that receive their pane shell from ~mountVisualizer~ (10).
+Both participate in ~children~ lifecycle like ~VisualizationPanel~ but do *not*
+subscribe to the selection store.
+
+* Background
+
+| Concern | Today (~lox-visualizer.ts~) | After |
+|---------+----------------------------+-------|
+| Editor | ~setUp~ lines ~137–158~: creates CodeMirror, Run button, replaces ~<pre>~ | ~EditorSlot~ fills ~.lox-panel--editor~ |
+| Console | ~displayConsole~ + ~render~ / ~rerun~ rAF calls; queries ~#lox-console~ | ~ConsoleSlot~ renders into ~.lox-panel--console~ |
+| Sample text | ~getText()~ reads editor or falls back to ~.language-nil~ | ~EditorSlot.getText()~; initial doc from ~MountResult.sampleCode~ |
+
+The orchestrator keeps: WASM wiring, ~render()~ → ~dataStore.set~, ~rerun~
+triggering ~lox.exports.runSource~.  It delegates display updates to slots.
+
+* Tasks
+
+** DONE Create ~EditorSlot~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/slots/editor-slot.ts (new)
+   :END:
+
+#+begin_src typescript
+export class EditorSlot extends Component implements VisualizerSlot {
+    readonly slotId = 'editor' as const;
+    private editorView!: EditorView;
+    private runButton!: HTMLButtonElement;
+
+    constructor(
+        private container: HTMLElement,
+        private initialDoc: string,
+        private onRun: (text: string) => void,
+    ) { super([], false); }
+
+    setUp() { /* port editor DOM from orchestrator */ }
+    tearDown() { /* destroy editorView, remove button */ }
+    getText(): string { return this.editorView.state.doc.toString(); }
+}
+#+end_src
+
+Port verbatim from orchestrator ~setUp~ (~137–158~):
+
+- ~EditorView~ + ~basicSetup~, doc = ~initialDoc~.
+- ~.lox-editor-box~ wraps ~editorView.dom~ inside ~container~ (~.lox-panel--editor~).
+- ~.lox-run-button~ appended via ~.lox-editor-container~ wrapper *inside*
+  ~container~ (structure matches today's DOM for CSS compatibility):
+
+#+begin_example
+.lox-panel--editor
+  .lox-editor-container
+    .lox-editor-box → .cm-editor
+    button.lox-run-button
+#+end_example
+
+~onRun~ is bound to ~() => this.onRun(this.getText())~.
+
+** DONE Create ~ConsoleSlot~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/slots/console-slot.ts (new)
+   :END:
+
+#+begin_src typescript
+export class ConsoleSlot extends Component implements VisualizerSlot {
+    readonly slotId = 'console' as const;
+
+    constructor(
+        private container: HTMLElement,
+        private getMessages: () => ConsoleMessage[],
+    ) { super([], false); }
+
+    render() { /* port displayConsole D3 join */ }
+    setUp() { /* optional: render empty */ }
+    tearDown() { /* clear container */ }
+}
+#+end_src
+
+Port ~displayConsole~ (~209–218~): join ~ConsoleMessage[]~ into ~div~ children
+with ~console-error~ / ~console-print~ classes.  Target ~this.container~, not
+~#lox-console~.
+
+A full ~ConsolePanel extends VisualizationPanel~ is out of scope (see
+~doc/todo/console-panel.org~); this slot is the minimal extraction needed for
+layout parity.
+
+** DONE Wire slots into ~createPanelRegistry~ (09)
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/layout.ts
+   :END:
+
+Replace throw-stubs with real factories.  Editor/console factories need extra
+callbacks (~onRun~, ~getMessages~) — extend ~PanelContext~:
+
+#+begin_src typescript
+export interface PanelContext {
+    …
+    onRun: (text: string) => void;
+    getConsoleMessages: () => ConsoleMessage[];
+}
+#+end_src
+
+** DONE Remove editor/console DOM logic from orchestrator (defer to 13)
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+*Do not edit the orchestrator in this stream* — 13 integrates mount + slots
+together.  Note the deletion targets here so 13 can grep:
+
+- ~displayConsole~ method → ~consoleSlot.render()~
+- editor creation block → ~EditorSlot~
+- ~getText~ → ~this.editor.getText()~
+
+* Dependencies
+
+- Types from 09 (~VisualizerSlot~, ~PanelContext~).
+- Pane shells from 10 (~containers.get('editor')~, etc.) — can develop against
+  a test ~div~ until 10 lands.
+
+* Acceptance
+
+- ~EditorSlot~ and ~ConsoleSlot~ construct in isolation (unit test or manual
+  fixture): editor shows CodeMirror, Run invokes callback, console renders
+  messages.
+- No imports from ~lox-visualizer.ts~ (avoid circular deps).
+
+* Open questions
+
+- Should ~ConsoleSlot.render~ be called from ~render()~ only, or also subscribe
+  to a store later?  For now: orchestrator calls ~consoleSlot.render()~ from
+  ~render~ and ~rerun~ rAF — same as today.

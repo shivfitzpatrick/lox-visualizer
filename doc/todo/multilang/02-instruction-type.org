@@ -1,0 +1,144 @@
+#+title: Instruction Type and Bytecode Decoupling
+#+date: 2026-06-18
+#+phase: 1b (after 01 merges; parallel with 03)
+
+Replace ~CompilerEvent~ in the panel/renderer data path with a neutral
+~Instruction~ type.  Mapping from Lox WASM events happens only in
+~deriveVizData~ (~lox-data.ts~); ~bytecode.ts~ and ~bytecode-panel.ts~ stop
+importing ~events.ts~.
+
+* Background
+
+~CompilerEvent~ (~events.ts~) is clox-specific (~src_offset~, ~chunk~, Lox op
+names).  Python ~dis.Instruction~ uses different field names but the same
+logical row.  The bytecode renderer only needs offset, op, operand display, and
+a source-link key (~srcOffset~).
+
+Today:
+
+- ~VizData.chunks~ is ~Map<string, CompilerEvent[]>~ (after *01*).
+- ~drawBytecode~ and ~BytecodePanel~ import ~CompilerEvent~ directly.
+- Rows use ~data-src-offset="${d.src_offset}"~ in the DOM.
+
+* Target ~Instruction~ shape
+
+#+begin_src typescript
+export interface Instruction {
+    chunk: string;
+    offset: number;
+    op: string;
+    line: number;
+    srcOffset: number;
+    arg?: number;
+    argCount?: number;
+    constant?: string;
+    jumpTarget?: number;
+}
+#+end_src
+
+Field mapping from ~CompilerEvent~:
+
+| CompilerEvent | Instruction |
+|---------------+-------------|
+| ~chunk~ | ~chunk~ |
+| ~offset~ | ~offset~ |
+| ~op~ | ~op~ |
+| ~line~ | ~line~ |
+| ~src_offset~ | ~srcOffset~ |
+| ~arg~ | ~arg~ |
+| ~arg_count~ | ~argCount~ |
+| ~constant~ | ~constant~ |
+| ~jump_target~ | ~jumpTarget~ |
+
+Omit ~upvalues~ and other Lox-only fields from ~Instruction~ unless the renderer
+needs them (it does not today).
+
+* Tasks
+
+** DONE Define ~Instruction~ and ~mapCompilerEvent~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-data.ts
+   :END:
+
+#+begin_src typescript
+export function mapCompilerEvent(event: CompilerEvent): Instruction { /* … */ }
+
+export function mapCompilerChunks(
+    chunks: Map<string, CompilerEvent[]>,
+): Map<string, Instruction[]> { /* map values */ }
+#+end_src
+
+Update ~VizData~:
+
+#+begin_src typescript
+export interface VizData {
+    lexemes: Lexeme[];
+    ast: AstNode;
+    chunks: Map<string, Instruction[]>;
+}
+#+end_src
+
+** DONE Map chunks in ~deriveVizData~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-data.ts
+   :END:
+
+#+begin_src typescript
+export function deriveVizData(state: LoxState): VizData {
+    const lexemes = state.lex();
+    const ast = state.parse();
+    const chunks = mapCompilerChunks(state.compile());
+    return { lexemes, ast, chunks };
+}
+#+end_src
+
+~LoxState.compile()~ continues returning ~CompilerEvent[]~ — no change to
+~state/state.ts~ event accumulation.
+
+** DONE Update ~drawBytecode~ to consume ~Instruction~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/bytecode.ts
+   :END:
+
+- Replace ~CompilerEvent~ with ~Instruction~ in signatures and generics.
+- ~data-src-offset~ uses ~d.srcOffset~.
+- ~formatOperand~ reads ~jumpTarget~, ~constant~, ~argCount~, ~arg~.
+- ~OnInstructionClick~ callback type uses ~Instruction~.
+- Remove ~events.ts~ import.
+
+** DONE Update ~BytecodePanel~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/panels/bytecode-panel.ts
+   :END:
+
+- Import ~Instruction~ from ~lox-data.ts~ (not ~events.ts~).
+- Click handler writes ~instr.srcOffset~ to ~selectionStore~.
+- Row highlight query uses ~data-src-offset~ (unchanged attribute name).
+
+** DONE Unit tests for mapping
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-data.test.ts (or new instruction.test.ts)
+   :END:
+
+- One ~CompilerEvent~ fixture → ~Instruction~ with all mapped fields.
+- ~jump_target~ / ~arg_count~ snake_case → camelCase verified.
+- Empty chunk map → empty ~Instruction[]~ values.
+
+* Dependencies
+
+- [[file:01-viz-data-types.org][01-viz-data-types.org]] merged (~VizData~ name and ~deriveVizData~ exist).
+- Independent of [[file:03-token-category-map.org][03-token-category-map.org]].
+
+* Acceptance
+
+- ~bytecode.ts~ and ~bytecode-panel.ts~ have zero imports from ~events.ts~.
+- Bytecode panel click → AST focus + ast↔bc connector still works (manual or
+  existing integration path).
+- ~grep 'CompilerEvent' app/src/lox-visualizer/panels~ → no matches.
+- Vitest green.
+
+* Open questions
+
+- Keep ~data-src-offset~ DOM attribute (snake-ish) vs rename to ~data-src-offset~
+  matching ~srcOffset~?  *Keep* ~data-src-offset~ — matches console panel and
+  avoids CSS/test churn in Phase 1.

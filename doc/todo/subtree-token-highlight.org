@@ -1,0 +1,156 @@
+#+title: Subtree Token Highlighting
+#+date: 2026-06-17
+
+When a parse node is focused in the AST panel, highlight every lexer token
+that belongs to any node in the subtree rooted at the selected node, not
+just the node's own primary token.
+
+* Background
+
+Each ~AstNode~ carries a ~start?: number~ field — the character offset of
+the token that "owns" that node.  The current ~onHighlight~ implementation
+in ~lox-visualizer-demo.ts~ queries exactly one span:
+
+#+begin_src typescript
+document.querySelector(`#lox-lexer span[data-start="${node.start}"]`)
+#+end_src
+
+This means selecting a ~Binary~ node highlights only the operator token,
+while the operand tokens remain unlit.  For any non-leaf node the full token
+extent of the construct is invisible.
+
+The fix is a two-phase change: (1) collect all ~start~ values from the
+subtree by walking ~AstNode.children~ recursively, then (2) highlight every
+matching span.
+
+** What is covered
+
+Every call to ~createNode~ stores one ~start~ on the resulting ~AstNode~.
+This covers:
+
+- Statement nodes (~OPEN~ action) — e.g. ~print~, ~if~, ~while~
+- Expression nodes (root of each ~parseExpression~ call) — e.g. ~+~, ~(~, function name
+
+~ATTR~ / ~PUSHATTR~ token positions are used only to resolve text and are not
+stored on the node.  Tokens for variable names, parameter lists, and other
+attributes are therefore ~not~ included in this approach.  That is a
+separate follow-up if needed.
+
+* Tasks
+
+** DONE Add ~collectSubtreeStarts~ utility to ~ast.ts~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/ast.ts
+   :END:
+
+Add an exported function next to ~drawAst~:
+
+#+begin_src typescript
+export function collectSubtreeStarts(node: AstNode): number[] {
+    const starts: number[] = [];
+    function walk(n: AstNode) {
+        if (n.start !== undefined) starts.push(n.start);
+        for (const child of n.children) walk(child);
+    }
+    walk(node);
+    return starts;
+}
+#+end_src
+
+No changes to ~AstNode~ itself are needed — ~start~ is already threaded
+through every node (see completed tasks in ~ast-token-connector.org~).
+
+** DONE Replace single-span tracking with multi-span in the demo
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer-demo.ts
+   :END:
+
+Current state:
+
+#+begin_src typescript
+highlightedSpan: HTMLElement | null = null;
+#+end_src
+
+Replace with:
+
+#+begin_src typescript
+highlightedSpans: HTMLElement[] = [];
+#+end_src
+
+Update the clear helper (~clearHighlightedSpan~, around line 211) to iterate
+and clear all spans in the array, then reset it to ~[]~.
+
+This task has no visible behavior change on its own — it is just the
+plumbing prerequisite.
+
+** DONE Highlight all subtree tokens in ~onHighlight~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer-demo.ts
+   :END:
+
+In ~onHighlight~ (currently around line 219), after the early-exit check:
+
+1. Call ~collectSubtreeStarts(node)~ to get all positions.
+2. Query every matching span and push into ~this.highlightedSpans~.
+3. Apply a visual style to each.  Use two levels:
+   - *Primary* token (~node.start~): current style — border + background.
+   - *Subtree* tokens (everything else): background only, no border, so they
+     read as "related" without competing with the primary highlight.
+4. Keep the connector drawn to the primary token only (~node.start~).
+
+Sketch:
+
+#+begin_src typescript
+const subtreeStarts = collectSubtreeStarts(node);
+for (const start of subtreeStarts) {
+    const span = document.querySelector<HTMLElement>(
+        `#lox-lexer span[data-start="${start}"]`
+    );
+    if (!span) continue;
+    this.highlightedSpans.push(span);
+    if (start === node.start) {
+        // primary
+        span.style.background = colors.background;
+        span.style.border = `1px solid ${colors.highlight}`;
+        span.style.borderRadius = '4px';
+        span.style.padding = '1px 3px';
+    } else {
+        // subtree
+        span.style.background = colors.background;
+        span.style.borderRadius = '4px';
+        span.style.padding = '1px 3px';
+    }
+}
+#+end_src
+
+Update the clear helper to reset all four inline styles (~background~,
+~border~, ~borderRadius~, ~padding~) for each span, not just the primary
+one.
+
+** TODO Adjust subtree highlight color
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer-demo.ts
+   :END:
+
+Once the feature is working end-to-end, dial in the subtree highlight color.
+Options:
+
+- Use a distinct ~colors~ key (e.g. ~colors.subtreeHighlight~), if one is
+  added to ~ColorScheme~.
+- Or keep the same ~colors.background~ but at reduced opacity using a CSS
+  ~rgba~ string computed from the hex color.
+
+Defer this refinement until the visual result is visible in the browser.
+
+* Open questions
+
+- Should tokens in a subtree that correspond to ~null~ starts (whitespace
+  lexemes) be skipped silently?  Yes — ~start === undefined~ is already
+  filtered in ~collectSubtreeStarts~.
+- Should keyboard arrow navigation (moving focus to a child node) narrow the
+  subtree highlight to the new selection?  Yes — ~onHighlight~ fires on
+  every arrow-key move already, so this happens automatically.
+- Is there value in also storing ATTR/PUSHATTR token positions on ~AstNode~
+  (e.g., to highlight a variable name token when a Var node is selected)?
+  Punting for now; would require a new ~tokenStarts?: number[]~ field on
+  ~AstNode~ and changes to ~parseNode~.

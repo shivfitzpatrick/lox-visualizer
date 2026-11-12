@@ -1,0 +1,192 @@
+#+TITLE: Lox Visualizer — Demo Hardening Plan
+#+DATE: 2026-07-27
+#+STARTUP: overview
+#+TODO: TODO(t) IN-PROGRESS(p) | DONE(d) SKIPPED(s)
+
+Goal: make the visualizer safe to demo to a stranger in the first 90 seconds,
+then stop. This is a hardening pass, not a feature pass. Hard timebox: *one
+week* (two absolute max). Anything tempting beyond this list goes under
+[[*Future directions (README fodder — do not build)][Future directions]] as a
+sentence, not a branch.
+
+Definition of done for the whole pass: a stranger can load the page, pick an
+example, click around, scrub an execution, hit an error case, and nothing
+confuses or breaks — and I can explain any file in the repo without hedging.
+
+* TODO [#A] 1. Example program selector                              :day1_2:
+
+Visitors who don't know Lox currently have nothing to do. A dropdown of
+curated samples is the single highest-impact demo fix.
+
+** TODO Build the selector mechanism
+- Small dropdown/select in or near the editor pane; swapping an example
+  replaces the editor contents and triggers the existing Build path.
+- Seeding from the post code block already exists; this generalizes it.
+  Likely touches: editor panel component, =mountVisualizer= /
+  =fromPage= config.
+- Keep it dependency-free and dumb: an array of ={ label, source }=.
+- Persist last-chosen example in =sessionStorage= only if trivial;
+  otherwise skip.
+
+** TODO Write the five samples
+Each sample is one panel's highlight reel. Short enough to read at a
+glance (roughly 5–15 lines each).
+
+- [ ] *Recursion* — =fib= or similar. Star of the show: call frames
+  stacking and unwinding in the Stack panel during playback.
+- [ ] *Closure* — exercises upvalue capture; Stack panel's upvalue
+  formatting gets used; bytecode shows closure ops.
+- [ ] *Function with parameters* — must exercise *parameter tracing*
+  (select a param in the AST → =OP_GET_LOCAL= / =OP_SET_LOCAL=
+  highlighting). This is the wow feature; at least one default-ish
+  sample must show it off.
+- [ ] *Loop* — visible stack churn while scrubbing; good playback
+  scrubber demo.
+- [ ] *Syntax error* — makes error rendering look intentional. Console
+  shows stderr; nothing else falls over.
+
+** TODO Sanity-check each sample end to end
+For each: build, click through lexer/AST/bytecode, scrub the trace,
+confirm connector lines and highlights behave.
+
+* TODO [#A] 2. Surface the trace cap in the UI                        :day2:
+
+Currently =while (true) print 1;= silently truncates at 10,000 steps with
+only a devtools console error — from the visitor's seat the tool just
+stops. An HN commenter will find this within minutes.
+
+- [ ] Visible banner/notice in the playback (or console) panel when the
+  cap is hit: e.g. "Execution trace capped at 10,000 steps — program may
+  not have terminated."
+- [ ] Confirm the playback controls behave sanely at the cap (scrubber
+  bounds, step counter reads =10000 / 10000=, no dead buttons).
+- [ ] Keep the existing devtools error; the banner supplements it.
+
+Half a day. Do not build "continue past the cap" — that's future
+directions.
+
+* TODO [#B] 3. Python backend: fix-or-unlink decision              :day3_am:
+
+Timebox the *investigation* to one morning, then commit to whichever
+branch it lands on.
+
+** TODO Investigate the token-map bug
+Known gap: lexer panel ignores the passed-in token category map and
+defaults to Lox's, so the Python view mis-colors. Determine: is this
+isolated plumbing, or the tip of deeper parity problems?
+
+** Branch A: fix is shallow → fix and keep
+- [ ] Fix the token-map plumbing so Python colors correctly.
+- [ ] Add a clear "work in progress" banner to the pyvis post.
+- [ ] Quick click-through of the Python panels; anything broken beyond
+  cosmetic → reconsider Branch B.
+- Payoff: a live second backend turns the language-neutral-core claim
+  from assertion into demonstration.
+
+** Branch B: deeper than the token map → unlink for launch
+- [ ] Remove/unlink =pyvis.md= from site navigation (keep the code and
+  the post draft).
+- [ ] The architecture story ("compiler-viz/ knows nothing about Lox;
+  Python adapter reuses the whole stack") lives in the write-up as
+  prose instead.
+
+* TODO [#A] 4. Ownership pass on AI-assisted code                  :day4_5:
+
+Standard: could explain any function's existence to a senior engineer
+screen-sharing the repo. Refactor only what I'd wince at; this is
+comprehension work, not a rewrite.
+
+Hand-built (skim only): lexer visualization, ~half the parser panel, VM
+logging protocol design.
+
+** TODO High priority — likely AI-heavy AND interview-probe targets
+- [ ] Event-accumulation state machine (=LoxState=) — largest test suite
+  (~1500 lines); read the implementation against its tests.
+- [ ] Offset → node resolution (=findNodeForOffset=) three-tier
+  preference logic — exact start / attribute position / declaration
+  header, deepest-match-wins. Be able to whiteboard it.
+- [ ] Execution tracing path: =vm_step= event → buffered → immutable
+  trace → per-step bytecode/AST highlighting.
+- [ ] Bytecode panel: op-aware operand formatting, subtree
+  highlighting, parameter tracing (slot-based for Lox).
+- [ ] Stack panel: frame grouping and value formatting.
+- [ ] Playback + time-aware console coupling (step-tagged print
+  events).
+
+** TODO Lower priority — skim
+- [ ] Connector geometry / anchor lifecycle.
+- [ ] Layout parsing + validation.
+- [ ] Responsive/mobile mode, pane switcher, swipe handling.
+- [ ] Store implementation (~35 lines; read it once, it's the
+  foundation).
+
+** TODO Capture notes for the write-up as I go
+Where Claude's code was good, where I intervened, what pattern kept it
+sane. This becomes the "AI-assisted development, honestly" section —
+do not reconstruct it from memory later.
+
+* TODO [#C] 5. Debt sweep (strictly optional, 15 minutes)            :cracks:
+
+Only because strangers are about to read the source. If anything
+resists, skip it — nobody rejects a candidate over a deprecated alias.
+
+- [ ] Delete deprecated aliases in =lox-data.ts= (=LoxData=,
+  =LoxDataStore=, =VisualizerSelection=, =deriveLoxData=) *if*
+  import-path tentacles are shallow.
+- [ ] Remove the unused container argument from =ConnectorLayer= (or
+  make it honest).
+- [ ] Pyodide stays on CDN — do NOT vendor.
+
+* TODO [#A] 6. Demo-path smoke test                                  :final:
+
+The interview scenario is a laptop screen and someone else's eyes.
+Fix only what breaks on the happy path.
+
+- [ ] Laptop-width pass (~1280–1440): default layout, all panels
+  visible, connector lines sane, nothing cramped.
+- [ ] Phone pass: mobile two-pane mode, tab bar, swipe, virtual
+  keyboard — I built it, so it will be judged as a feature.
+- [ ] Firefox pass.
+- [ ] Safari pass — prime suspects: WASM loading, =visualViewport=,
+  =ResizeObserver=, sticky/fixed overlay behavior.
+- [ ] Cold-load timing check: first paint → interactive feels fast
+  enough; note (don't fix) anything slow for future directions.
+- [ ] Run =make test= and =make typecheck= clean at the end of the
+  pass.
+
+* Explicitly out of scope — do not touch
+
+Working, done, and demo-complete. Every one of these is a scope-creep
+magnet with zero remaining demo value:
+
+- Layout system and declarative layout syntax
+- Connector topology
+- Focus-mode exclusivity (selection vs execution)
+- AST navigation (keyboard, D-pad, zoom/pan)
+- Hugo → Next.js migration (solves a maintenance annoyance, not a
+  job-search problem; risks breaking a working demo)
+- Educational-tool features (curriculum, progressive lessons,
+  explanatory copy)
+- "Continue past the trace cap"
+- Vendoring Pyodide
+
+* Future directions (README fodder — do not build)
+
+One sentence each in the README; costs a sentence instead of a week,
+still signals vision.
+
+- Resumable/streaming execution traces past the cap
+- Python backend at full parity; third language adapter as proof of
+  the abstraction
+- Progressive educational mode with guided examples
+- Unified site tooling (post-offer list)
+
+* Done criteria / exit checklist
+
+- [ ] Five examples selectable and each demos its panel
+- [ ] Trace cap visible in UI
+- [ ] Python: fixed-and-bannered or unlinked — decided, not deferred
+- [ ] I can explain every high-priority module without hedging
+- [ ] Smoke test passed on laptop, phone, Firefox, Safari
+- [ ] =make test= and =make typecheck= green
+- [ ] Write-up notes captured from the ownership pass

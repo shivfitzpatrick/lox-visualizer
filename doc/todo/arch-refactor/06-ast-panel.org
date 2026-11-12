@@ -1,0 +1,218 @@
+#+title: AST Panel
+#+date: 2026-06-18
+#+phase: 2b (after 04 — parallel with 05, 07)
+
+Wrap ~drawAst~ in an ~AstPanel extends VisualizationPanel~.  The AST panel is
+the hub of the selection model: it focuses/animates to the selected node,
+resolves ~selectedStart~ → ~selectedAstNode~ (writing it back to the store), and
+publishes the ~'ast'~ anchor that both connector lines share.
+
+* Background
+
+~drawAst~ (~app/src/lox-visualizer/ast.ts~) owns its own d3 zoom/pan + focus
+state and currently returns just a ~focusByStart~ function.  The demo:
+
+- stores that function in ~this.focusByStart~ (demo line 280),
+- calls it from lexer clicks and bytecode clicks,
+- receives node focus changes via the ~onHighlight(node, el)~ callback (demo
+  231–268), which draws the ~ast-lexer~ connector from the node's SVG ~rect~.
+
+The architecture wants ~drawAst~ to return a *richer object* (focus handle +
+a selection-rect getter) while keeping its internals the same
+(~doc/lox-visualizer-architecture.org~ → "What does not need to change"):
+
+#+begin_src typescript
+// Inside AstPanel.onSelectionChange:
+if (state.selectedStart !== null) {
+    this.focusByStart(state.selectedStart);      // animates to node
+    // After animation resolves:
+    const rect = this.getSelectedNodeRect();
+    this.connectors.setAnchor('ast', rect);
+} else {
+    this.connectors.setAnchor('ast', null);
+}
+#+end_src
+
+Container: ~#lox-ast~.  Anchor id: ~'ast'~.
+
+* Tasks
+
+** DONE Enrich ~drawAst~'s return value
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/ast.ts
+   :END:
+
+⚠ *Breaking-change hazard — backward-compatibility gated.*  ~ast.ts~ is imported
+by the still-live ~lox-visualizer-demo.ts~, which does
+~this.focusByStart = drawAst(...)~ expecting a *function* return (demo line
+280).  Returning a plain object instead breaks the demo at compile + runtime
+before 08 cuts over.  See ~00-overview.org~ → "Breaking changes and safe
+sequencing".
+
+Change ~drawAst~ to expose a richer ~AstHandle~.  Keep all existing internals
+(zoom, ~moveFocus~, ~focusNode~, keyboard nav) unchanged.
+
+#+begin_src typescript
+export interface AstHandle {
+    focusByStart(start: number): void;        // existing behavior
+    getSelectedNode(): AstNode | null;        // currently focused node's data
+    getSelectedNodeRect(): DOMRect | null;    // bounding rect of focused node's <rect>
+    findByStart(start: number): AstNode | null; // resolve offset → node (no focus)
+    clearFocus(): void;                        // de-select (today: svg click handler)
+}
+#+end_src
+
+- ~focusByStart~: the existing inner ~focusByStart~ closure.
+- ~getSelectedNode~: return ~focusedHNode?.data ?? null~.
+- ~getSelectedNodeRect~: from the focused node's ~<g>~ element, query its
+  ~rect~ child and return ~rect.getBoundingClientRect()~ (mirrors how the demo
+  derived ~astRect~ in ~onHighlight~, lines 242, 264).  Return null if nothing
+  focused.
+- ~findByStart~: ~root.descendants().find(d => d.data.start === start)?.data~
+  (reuses the lookup ~focusByStart~ already does) so ~AstPanel~ can resolve
+  ~selectedStart~ → ~selectedAstNode~ without animating.
+- ~clearFocus~: factor out the body of the existing ~svg.on('click', ...)~
+  handler (line 151) so the panel can clear selection programmatically.
+
+*How to land it without breaking ~main~* — choose one:
+
+- *Backward-compatible now* (preferred): return a value that is *both* a
+  function and carries the handle fields, so the demo's
+  ~this.focusByStart = drawAst(...)~ keeps working while ~AstPanel~ reads the
+  extra fields:
+  #+begin_src typescript
+  export type AstHandle = ((start: number) => void) & {
+      getSelectedNode(): AstNode | null;
+      getSelectedNodeRect(): DOMRect | null;
+      findByStart(start: number): AstNode | null;
+      clearFocus(): void;
+  };
+  export function drawAst(...): AstHandle {
+      // ... build the existing focusByStart closure ...
+      const handle = focusByStart as AstHandle;
+      handle.getSelectedNode = () => focusedHNode?.data ?? null;
+      handle.getSelectedNodeRect = () => /* ... */;
+      handle.findByStart = (s) => /* ... */;
+      handle.clearFocus = () => /* ... */;
+      return handle;
+  }
+  #+end_src
+  The demo still calls the result as a function; ~AstPanel~ uses
+  ~handle.getSelectedNodeRect()~ etc.  Convert to a clean object-only ~AstHandle~
+  (the shape at the top of this task) during 08 once the demo is gone.
+- *Defer*: keep this signature change out of the 06 stream and land it in 08,
+  alongside the demo replacement.  ~AstPanel~ then can't be exercised end-to-end
+  until 08, but the rest of the panel logic can still be written against the
+  intended interface.
+
+Either way, the function→object-only break lands *with or after* 08.
+
+** DONE Replace the ~onHighlight~ callback with store writes
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/ast.ts
+   :END:
+
+~drawAst~ currently fires ~onHighlight(node, el)~ on focus changes (from zoom
+end, keyboard nav, clicks; see ~moveFocus~ line 139 and zoom ~end~ line 56–60).
+The panel must learn when the *user* changes focus inside the canvas so it can
+write to the store.
+
+Keep ~onHighlight~ as the panel's inbound hook but redefine its meaning: it
+signals "the user focused this node" / "the user cleared focus".  Pass a
+callback from ~AstPanel~ that does:
+
+#+begin_src typescript
+onHighlight: (node, _el) => {
+    if (node && node.start != null) {
+        this.selectionStore.set({ selectedStart: node.start, selectedAstNode: node });
+    } else {
+        this.selectionStore.set({ selectedStart: null, selectedAstNode: null });
+    }
+}
+#+end_src
+
+Guard against feedback loops: when the panel calls ~focusByStart~ *in response
+to* a store change, the resulting ~onHighlight~ will write the same
+~selectedStart~ back — the store's no-op-on-unchanged guard (see
+~01-store.org~) absorbs this.  Verify ~selectedAstNode~ reference equality holds
+so the write-back is also a no-op (same node object from the same parse).
+
+** DONE Create ~panels/ast-panel.ts~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/panels/ast-panel.ts (new)
+   :END:
+
+#+begin_src typescript
+export class AstPanel extends VisualizationPanel {
+    readonly panelId = 'ast';
+    private handle: AstHandle | null = null;
+
+    onDataChange(data: LoxData) {
+        this.handle = drawAst(select(this.container), data.ast, colors, (n, el) => /* store write */);
+    }
+
+    onSelectionChange(state: VisualizerSelection) { /* focus + resolve + anchor */ }
+}
+#+end_src
+
+~onDataChange~: call ~drawAst~ with ~data.ast~ and the shared ~colors~ (from the
+extracted ~theme.ts~ — coordinate with 05/07).
+
+** DONE Implement ~onSelectionChange~ (focus, resolve, anchor)
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/panels/ast-panel.ts
+   :END:
+
+1. If ~state.selectedStart === null~: ~this.handle?.clearFocus()~,
+   ~this.setAnchor(null)~, return.
+2. Resolve-and-write-back: if ~state.selectedAstNode === null~, look up the node
+   for ~selectedStart~ and write it back so the lexer panel can highlight the
+   subtree.  The lookup can reuse ~focusByStart~'s internal find, or expose a
+   ~findByStart(start): AstNode | null~ on ~AstHandle~.  Write
+   ~this.selectionStore.set({ selectedAstNode: node })~ (idempotent via store guard).
+3. Animate: ~this.handle?.focusByStart(state.selectedStart)~.  Focusing is
+   async (400ms transition).  Publish the anchor *after* the animation so the
+   rect is final:
+   - Either expose an ~onComplete~ from ~focusByStart~/~moveFocus~ (the d3
+     transition already has an ~end~ hook — see ast.ts ~focusNode~ 119–132), or
+   - publish the rect from the ~onHighlight~ callback which already fires at
+     transition end (~moveFocus~ → ~onHighlight~ on complete).
+   Recommended: have the panel's ~onHighlight~ callback *also*
+   ~this.setAnchor(this.handle.getSelectedNodeRect())~ once focus settles,
+   covering both user-driven and store-driven focus.
+
+** DONE Verify connector parity for the bc↔ast line
+   :PROPERTIES:
+   :files:    (coordination note for 07, 08)
+   :END:
+
+Today ~onHighlight~ also drew the ~bc-ast~ connector when the selected
+instruction's offset matched the node (demo 265–267).  In the new model that
+line is just ~addLine('ast','bc')~: the AST panel publishes ~'ast'~, the
+bytecode panel publishes ~'bc'~, and the layer draws it automatically when both
+are set.  No special-casing in the AST panel — confirm the bytecode panel
+(07) publishes its row rect on selection so the line appears.
+
+** DONE Tear-down
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/panels/ast-panel.ts
+   :END:
+
+~drawAst~ attaches zoom/keydown/click listeners to the SVG it creates; since
+~onDataChange~ removes and recreates the SVG (~container.selectAll('svg').remove()~,
+ast.ts line 34) on each render, listeners die with the element.  On ~tearDown~,
+null out ~this.handle~ and clear the anchor.
+
+* Open questions
+
+- *Sync vs async node resolution*: resolving ~selectedAstNode~ immediately (step
+  2) before the 400ms focus animation means the lexer subtree highlight appears
+  instantly while the AST is still animating.  Probably desirable.  Confirm with
+  05's "two-step flash" open question — settle the ordering once.
+- *Anchor timing*: publishing the ~'ast'~ rect mid-animation would draw a line
+  to a moving target.  Publish only on transition end (recommended).  Until
+  then the line stays hidden (anchor null), which matches today (the connector
+  was drawn at ~onHighlight~ completion).
+- *Should ~drawAst~ own the store?*  No — keep ~ast.ts~ a pure renderer that
+  reports focus via callback and exposes getters.  All store logic stays in
+  ~AstPanel~ so ~ast.ts~ remains reusable, per the architecture.

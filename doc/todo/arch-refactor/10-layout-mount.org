@@ -1,0 +1,139 @@
+#+title: Layout Mount (DOM Builder)
+#+date: 2026-06-18
+#+phase: 4b (after 09 — parallel with 11 and 12)
+
+Implement ~mountVisualizer~: given a sample-code anchor (~<pre>~ containing
+~.language-nil~) and a ~VisualizerLayout~, build the ~.lox-visualizer~ DOM
+tree, extract the sample source, and return ~MountResult~ (see 09).
+
+* Background
+
+Today ~setUp~ does two unrelated DOM surgeries:
+
+1. Replace the ~<pre>~ with a ~.lox-editor-container~ (editor only).
+2. Assume panel ~#lox-*~ divs already exist as post siblings.
+
+After this task, *all* pane shells are created programmatically inside one root,
+and the ~<pre>~ is replaced by that root (editor pane is empty until 11's
+~EditorSlot~ fills it).
+
+* Target mount flow
+
+#+begin_example
+Before (post):
+  <pre><code class="language-nil">fun …</code></pre>
+  <div id="lox-lexer">…</div>   ← author-maintained
+  …
+
+After mountVisualizer(pre, layout):
+  <div class="lox-visualizer">
+    <div class="lox-visualizer-row">
+      <div class="lox-panel lox-panel--editor" id="lox-editor"></div>
+      <div class="lox-panel lox-panel--lexer"  id="lox-lexer"></div>
+    </div>
+    <div class="lox-visualizer-row">
+      <div class="lox-panel lox-panel--ast" id="lox-ast"></div>
+    </div>
+    …
+  </div>
+#+end_example
+
+~sampleCode~ = text content of the code element (trim trailing newline once, same
+as today's ~getText()~ fallback).
+
+* Tasks
+
+** DONE Create ~mount.ts~ with ~findCodeAnchor~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/mount.ts (new)
+   :END:
+
+#+begin_src typescript
+export function findCodeAnchor(
+    doc: Document | HTMLElement = document,
+    selector = '.language-nil',
+): { pre: HTMLElement; code: HTMLElement; sampleCode: string } | null
+#+end_src
+
+Walk ~selector~ → closest ~<pre>~ (same logic as orchestrator today).  Return
+~null~ if not found (orchestrator should no-op or log — see 13).
+
+** DONE Implement ~buildLayoutDOM(layout)~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/mount.ts
+   :END:
+
+- Create ~div.lox-visualizer~.
+- For each non-empty row in ~layout~ (after ~validateLayout~):
+  - append ~div.lox-visualizer-row~,
+  - for each ~kind~ in the row, append a pane shell:
+    - classes: ~lox-panel lox-panel--{kind}~,
+    - optional ~id="lox-{kind}"~ using a fixed map (~bytecode~ → ~lox-compiler~
+      to preserve the legacy id the bytecode CSS once targeted, or standardize
+      on ~lox-bytecode~ — *pick one in this task and document in 12*).
+- Return ~{ root, containers: Map<PanelKind, HTMLElement> }~.
+
+Do *not* wire CodeMirror or D3 here — empty shells only.
+
+** DONE Implement ~mountVisualizer(anchor, layout)~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/mount.ts
+   :END:
+
+1. Resolve ~anchor~ (~<pre>~ or the code element — accept either).
+2. Extract ~sampleCode~.
+3. ~buildLayoutDOM(layout)~.
+4. ~anchor.replaceWith(root)~ (replace the whole ~<pre>~, not just the code).
+5. Return ~MountResult~.
+
+If the post still contains legacy ~#lox-*~ sibling divs (during migration),
+they are orphaned and harmless until 14 removes them.  Optionally log a dev
+warning if ~#lox-lexer~ exists as a *sibling* of the replaced pre (author
+forgot to clean the post).
+
+** DONE Unit tests for layout DOM
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/mount.test.ts (new)
+   :END:
+
+Use jsdom / vitest (same pattern as ~store.test.ts~):
+
+- ~DEFAULT_LAYOUT~ produces 4 rows, 5 pane shells, correct classes.
+- A minimal layout ~[['lexer']]~ produces one row, one shell.
+- Duplicate kind in layout throws or rejects (~validateLayout~).
+- ~sampleCode~ extraction trims sanely.
+
+** DONE Fix ~ast.ts~ scoped selectors (collocated)
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/ast.ts
+   :END:
+
+~drawAst~ receives ~container~ as the ~#lox-ast~ (soon: ~.lox-panel--ast~)
+element but internally selects ~container.select('#lox-ast g.nodes')~ — wrong
+when ~container~ *is* the ast panel.  Change to:
+
+#+begin_src typescript
+container.select('g.nodes')   // or svg.select('g.nodes') after svg is created
+container.select('g.links')
+#+end_src
+
+Verify ~AstPanel~ still renders links + nodes.  This is independent of CSS
+migration but unblocks dropping the hard ~id="lox-ast"~ requirement.
+
+* Dependencies
+
+- Imports types + ~validateLayout~ from ~layout.ts~ (09).
+- Does *not* import panel classes (no circular deps).
+
+* Acceptance
+
+- ~mountVisualizer~ on a fixture ~<pre><code class="language-nil">x</code></pre>~
+  yields a single ~.lox-visualizer~ root with the configured row/pane structure.
+- Tests pass.
+- ~ast.ts~ selectors are container-scoped.
+
+* Open questions
+
+- *Bytecode id:* ~lox-compiler~ (legacy) vs ~lox-bytecode~ (consistent).  Pick
+  ~lox-compiler~ if 12 hasn't migrated bytecode CSS off ids yet; otherwise
+  standardize on ~lox-bytecode~ everywhere.

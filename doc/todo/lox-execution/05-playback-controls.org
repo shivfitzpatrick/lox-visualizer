@@ -1,0 +1,208 @@
+#+title: Playback Controls
+#+date: 2026-06-18
+#+phase: 2 (after 02 — parallel with 03, 04)
+
+Build the playback controls bar: step buttons, a scrubber, a step counter, and
+auto-play with a fixed interval.  The controls write to =ExecutionStore=; panels
+(03, 04) react to store changes independently.
+
+* Background
+
+The controls bar is a thin UI component that reads and writes =ExecutionStore=.
+It has no knowledge of the stack panel or the bytecode panel — all coordination
+happens via the store.
+
+Depends on: =ExecutionStore= from 02.
+
+* Tasks
+
+** DONE Create =app/src/compiler-viz/panels/playback-controls.ts=
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/panels/playback-controls.ts (new)
+   :END:
+
+Scaffold the component:
+
+#+begin_src typescript
+import type { ExecutionStore } from '@/compiler-viz/execution';
+
+export class PlaybackControls {
+    private store: ExecutionStore;
+    private container: HTMLElement;
+    private intervalId: ReturnType<typeof setInterval> | null = null;
+    private unsubscribe: (() => void) | null = null;
+
+    constructor(container: HTMLElement, store: ExecutionStore) {
+        this.container = container;
+        this.store = store;
+    }
+
+    setUp() {
+        this.render();
+        this.unsubscribe = this.store.subscribe(() => this.update());
+    }
+
+    tearDown() {
+        this.pause();
+        this.unsubscribe?.();
+    }
+
+    private render() { /* build the DOM once */ }
+    private update() { /* sync scrubber + counter + button states */ }
+    private pause() { if (this.intervalId) { clearInterval(this.intervalId); this.intervalId = null; } }
+}
+#+end_src
+
+** DONE Render the controls DOM
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/panels/playback-controls.ts
+   :END:
+
+Build the controls once in =render()=.  Use plain DOM (=document.createElement=
+/ =d3.select=), not innerHTML, so event listeners attach cleanly:
+
+#+begin_src html
+<!-- target structure -->
+<div class="playback-controls">
+  <button class="pb-start"  title="Go to start">◄◄</button>
+  <button class="pb-back"   title="Step back">◄</button>
+  <button class="pb-play"   title="Play / pause">►</button>
+  <button class="pb-fwd"    title="Step forward">►</button>
+  <button class="pb-end"    title="Go to end">►►</button>
+  <input  class="pb-scrub"  type="range" min="0" value="0" />
+  <span   class="pb-counter">Step 0 / 0</span>
+</div>
+#+end_src
+
+Wire click handlers during =render()= (called once in =setUp=):
+
+- =pb-start=: =this.store.set({ currentStep: 0 })=
+- =pb-back=: =stepBackward()=
+- =pb-play=: toggle play/pause
+- =pb-fwd=: =stepForward()=
+- =pb-end=: =this.store.set({ currentStep: steps.length - 1 })=
+- =pb-scrub= (=input= event): =this.store.set({ currentStep: Number(e.target.value) })=
+
+** DONE Implement step helpers
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/panels/playback-controls.ts
+   :END:
+
+#+begin_src typescript
+private stepForward() {
+    const { currentStep, steps, playing } = this.store.get();
+    if (currentStep === null) return;
+    if (currentStep >= steps.length - 1) {
+        if (playing) this.pause();
+        return;
+    }
+    this.store.set({ currentStep: currentStep + 1 });
+}
+
+private stepBackward() {
+    const { currentStep } = this.store.get();
+    if (currentStep === null || currentStep <= 0) return;
+    this.store.set({ currentStep: currentStep - 1 });
+}
+#+end_src
+
+** DONE Implement play / pause toggle
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/panels/playback-controls.ts
+   :END:
+
+Auto-play advances one step every 200 ms.  When =currentStep= reaches the end,
+clear the interval and set =playing = false=.
+
+#+begin_src typescript
+private togglePlay() {
+    const { playing, currentStep, steps } = this.store.get();
+    if (playing) {
+        this.pause();
+        this.store.set({ playing: false });
+    } else {
+        if (currentStep === null || currentStep >= steps.length - 1) {
+            // Restart from beginning if at end
+            this.store.set({ currentStep: 0 });
+        }
+        this.store.set({ playing: true });
+        this.intervalId = setInterval(() => this.stepForward(), 200);
+    }
+}
+#+end_src
+
+Note: =stepForward()= calls =this.pause()= internally when the last step is
+reached, but does not set =playing = false= in the store — do that here via
+=this.store.set({ playing: false })= inside the interval's end-of-trace guard.
+Simplest: move the end-guard into =togglePlay='s interval callback directly so
+both =pause()= and the store update happen in one place.
+
+** DONE Implement =update= — sync UI to store state
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/panels/playback-controls.ts
+   :END:
+
+Called by the store subscription on every state change.  Keep it cheap — just
+read the DOM nodes stored as fields and update their values/attributes:
+
+#+begin_src typescript
+private update() {
+    const { currentStep, steps, playing } = this.store.get();
+    const n = currentStep ?? 0;
+    const total = steps.length;
+
+    this.scrubEl.max = String(Math.max(0, total - 1));
+    this.scrubEl.value = String(n);
+    this.counterEl.textContent = `Step ${n + 1} / ${total}`;
+    this.playBtn.textContent = playing ? '⏸' : '►';
+
+    const atStart = n <= 0;
+    const atEnd = n >= total - 1;
+    this.startBtn.disabled = atStart;
+    this.backBtn.disabled = atStart;
+    this.fwdBtn.disabled = atEnd;
+    this.endBtn.disabled = atEnd;
+
+    // Hide entirely when no steps collected yet
+    this.container.style.display = total === 0 ? 'none' : '';
+}
+#+end_src
+
+Store =this.scrubEl=, =this.counterEl=, etc. as fields during =render()=.
+
+** DONE Mount in the orchestrator
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer-demo.ts (or the refactored orchestrator)
+   :END:
+
+Add a container to the cloxvis post markup (=content/posts/cloxvis.md=):
+
+#+begin_src html
+<div id="lox-playback"></div>
+#+end_src
+
+Mount in the orchestrator:
+
+#+begin_src typescript
+const pbContainer = document.querySelector<HTMLElement>('#lox-playback');
+if (pbContainer) {
+    const controls = new PlaybackControls(pbContainer, this.executionStore);
+    controls.setUp();
+}
+#+end_src
+
+The controls hide themselves (=display: none=) until =steps.length > 0=, so they
+don't show a broken UI before the first run.
+
+* Open questions
+
+- *Interval speed*: 200 ms (5 steps/s) is a starting point.  A variable-speed
+  selector is a polish item (see 06).  If 200 ms feels too slow for simple
+  programs and too fast for complex ones, consider 150 ms as a default.
+- *Sync scrubber drag vs. store*: while dragging the scrubber, the store fires
+  on every =input= event which triggers =update= which sets =scrubEl.value=.
+  This causes a feedback loop but is typically benign (the browser ignores a
+  programmatic value-set during a drag).  Test in practice.
+- *=playing= flag and tab-hidden auto-advance*: if the browser tab goes to the
+  background, =setInterval= may throttle.  This is acceptable for a visualization;
+  no special handling needed.

@@ -1,0 +1,291 @@
+#+title: VM Bytecode Panel
+#+date: 2026-06-17
+
+Display a panel below the AST that lists the VM instructions output by the
+clox compiler.  Instructions are emitted as JSON after compilation completes
+and rendered in the frontend as a collapsible, hoverable list.
+
+Chosen design:
+- *Chunks*: all chunks (script + all nested function/closure/method chunks)
+- *Emit strategy*: batch after ~compile()~ returns, with source character
+  offsets stored in a parallel array on ~Chunk~
+- *Interactivity*: hovering an instruction highlights the matching source
+  span and AST node (linked via ~src_offset~ ↔ ~AstNode.start~)
+
+* Background
+
+clox emits JSON events to stdout via ~printf~ guarded by compile-time flags
+(~JSON_LOG_SCANNER~, ~JSON_LOG_AST~).  Emscripten captures stdout and the
+frontend dispatches events by ~msg_type~.
+
+The compiler produces one ~Chunk~ per function/closure/method.  The top-level
+script is the ~ObjFunction~ returned by ~compile()~; inner functions are stored
+as ~OBJ_FUNCTION~ constants within their enclosing chunk's ~ValueArray~.
+
+~Chunk~ currently stores line numbers via a run-length-encoded ~LineArray~ but
+does not store source character offsets.  AST nodes carry ~start~ (source char
+offset) via the parser event pipeline.  To link instructions to AST nodes we
+need the same ~start~ values recorded at instruction-emit time.
+
+* Tasks
+
+** DONE clox: Extend ~Chunk~ with a parallel source-offset array
+   :PROPERTIES:
+   :files:    clox/src/lib/chunk.h, clox/src/lib/chunk.c
+   :END:
+
+Add a ~int* srcOffsets~ direct array to ~Chunk~ (not RLE — one entry per byte
+in ~code~).  Update the three lifecycle functions:
+
+- ~initChunk~: set ~srcOffsets = NULL~
+- ~writeChunk~: grow ~srcOffsets~ alongside ~code~; store the offset value
+- ~freeChunk~: free ~srcOffsets~
+
+Change the signature of ~writeChunk~ to accept a ~int srcOffset~ parameter.
+
+#+begin_src c
+void writeChunk(Chunk* chunk, uint8_t byte, int line, int srcOffset);
+#+end_src
+
+** DONE clox: Thread ~src_offset~ through ~compiler.c~
+   :PROPERTIES:
+   :files:    clox/src/lib/compiler.c
+   :END:
+
+Add a file-scope global ~static const char* sourceStart;~ to ~compiler.c~.
+Set it at the top of ~compile()~: ~sourceStart = source;~.
+
+In ~emitByte()~, compute the offset and pass it to ~writeChunk~:
+
+#+begin_src c
+static void emitByte(uint8_t byte) {
+  int srcOffset = (int)(parser.previous.start - sourceStart);
+  writeChunk(currentChunk(), byte, parser.previous.line, srcOffset);
+}
+#+end_src
+
+Update every other direct call to ~writeChunk~ in the compiler (there should
+be few or none outside ~emitByte~) to pass a valid srcOffset.
+
+** DONE clox: Add JSON chunk disassembler
+   :PROPERTIES:
+   :files:    clox/src/lib/debug.h, clox/src/lib/debug.c
+   :END:
+
+Add a new function ~disassembleChunkJSON~ that walks a ~Chunk~ and emits one
+JSON line per logical instruction (not per byte).  Each line must include:
+
+#+begin_src json
+{"msg_type": "compiler", "chunk": "<name>", "offset": 0,
+ "op": "OP_CONSTANT", "line": 1, "src_offset": 4,
+ "arg": 0, "constant": "1.5"}
+#+end_src
+
+Fields:
+- ~chunk~: function name (use ~"<script>"~ for the top-level chunk)
+- ~offset~: byte offset within the chunk
+- ~op~: opcode name as a string
+- ~line~: source line number (via existing ~getLine~)
+- ~src_offset~: ~chunk->srcOffsets[offset]~
+- ~arg~ / ~constant~ / ~jump_target~: opcode-specific operand fields
+  (model after the existing ~constantInstruction~, ~byteInstruction~,
+  ~jumpInstruction~ helpers — add JSON-emitting variants)
+
+After emitting all instructions in a chunk, recursively walk
+~chunk->constants~ looking for ~OBJ_FUNCTION~ values and call
+~disassembleChunkJSON~ on each, using the function's name as the chunk label.
+
+Declare in ~debug.h~:
+#+begin_src c
+void disassembleChunkJSON(Chunk* chunk, const char* name);
+#+end_src
+
+** DONE clox: Wire JSON disassembly in ~vm.c~ after compilation
+   :PROPERTIES:
+   :files:    clox/src/lib/vm.c
+   :END:
+
+In ~interpret()~, after ~compile()~ returns the ~ObjFunction*~ and before
+execution begins, add:
+
+#+begin_src c
+#ifdef JSON_LOG_COMPILER
+  disassembleChunkJSON(&function->chunk, "<script>");
+#endif
+#+end_src
+
+This mirrors the existing ~DEBUG_PRINT_CODE~ block already in ~vm.c~.  The
+recursive walk inside ~disassembleChunkJSON~ handles all nested chunks.
+
+** DONE clox: Update Makefile and rebuild WASM
+   :PROPERTIES:
+   :files:    clox/Makefile
+   :END:
+
+Add ~-DJSON_LOG_COMPILER~ to ~JSON_FLAGS~:
+
+#+begin_src makefile
+JSON_FLAGS = -DJSON_LOG_SCANNER -DJSON_LOG_AST -DJSON_LOG_COMPILER -DJSON_LOG_PRINT
+#+end_src
+
+Run ~make wasm~ and copy the output to the goodskynet project:
+
+#+begin_src sh
+cp bin/lox.js  <goodskynet>/public/js/lox-visualizer/lox.js
+cp bin/lox.wasm <goodskynet>/public/js/lox-visualizer/lox.wasm
+#+end_src
+
+Verify with a simple Lox program that ~compiler~ events appear in the JSON
+stream before wiring up the frontend.
+
+** DONE Frontend: Add ~CompilerEvent~ type
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/events.ts
+   :END:
+
+#+begin_src typescript
+export interface CompilerEvent {
+  msg_type: 'compiler';
+  chunk: string;
+  offset: number;
+  op: string;
+  line: number;
+  src_offset: number;
+  arg?: number;
+  constant?: string;
+  jump_target?: number;
+}
+#+end_src
+
+** DONE Frontend: Register ~compiler~ event in ~lox-core.ts~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-core.ts
+   :END:
+
+Add ~'compiler'~ to the ~d3.dispatch(...)~ call so compiler events are
+dispatched like lexer and parser events.
+
+** DONE Frontend: Add compiler state to ~LoxState~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/state/state.ts
+   :END:
+
+Extend ~LoxStateProps~:
+
+#+begin_src typescript
+compilerEvents: CompilerEvent[];
+#+end_src
+
+Initialize to ~[]~ in the constructor.  Add a ~compile()~ method that groups
+events by ~chunk~ name and returns a ~Map<string, CompilerEvent[]>~ (insertion
+order = natural chunk order: script first, then nested functions as they
+appear in the constants).
+
+#+begin_src typescript
+compile(): Map<string, CompilerEvent[]> {
+  const chunks = new Map<string, CompilerEvent[]>();
+  for (const event of this.get('compilerEvents')) {
+    let list = chunks.get(event.chunk);
+    if (!list) { list = []; chunks.set(event.chunk, list); }
+    list.push(event);
+  }
+  return chunks;
+}
+#+end_src
+
+** DONE Frontend: Create ~bytecode.ts~ panel module
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/bytecode.ts  (new)
+   :END:
+
+Export a ~drawBytecode~ function analogous to ~drawAst~:
+
+#+begin_src typescript
+export type OnInstructionHover = (event: CompilerEvent | null) => void;
+
+export function drawBytecode(
+  target: Selection<HTMLElement, unknown, HTMLElement, unknown>,
+  chunks: Map<string, CompilerEvent[]>,
+  onHover?: OnInstructionHover,
+): void
+#+end_src
+
+Render each chunk as a ~<details>/<summary>~ collapsible section (the script
+chunk open by default, nested functions collapsed).  Inside each section,
+render a ~<table>~ with columns: offset | line | opcode | operands.
+
+Bind ~mouseenter~ / ~mouseleave~ on each row to call ~onHover~ with the
+~CompilerEvent~ (or ~null~ on leave).
+
+** DONE Frontend: Add ~#lox-bytecode~ div to the post
+   :PROPERTIES:
+   :files:    content/posts/cloxvis.md
+   :END:
+
+Add the panel div below ~#lox-ast~ in the post body:
+
+#+begin_src html
+<div id="lox-bytecode"></div>
+#+end_src
+
+** DONE Frontend: Wire compiler events in ~lox-visualizer-demo.ts~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer-demo.ts
+   :END:
+
+1. Import ~drawBytecode~ from ~bytecode.ts~.
+2. Add a ~compilerDone: boolean~ flag (similar to ~parserRendered~).
+3. Listen on ~lox.events.on('compiler', ...)~: push to
+   ~loxState.push('compilerEvents', event)~.
+4. Detect completion: the last event for the script chunk is
+   ~OP_RETURN~ at the end of ~<script>~, but this is fragile.  Instead,
+   piggyback on the existing ~parserRendered~ flag — bytecode is always
+   emitted after the AST events, so by the time ~parserRendered~ fires,
+   all compiler events have already arrived.  Render bytecode in the same
+   ~requestAnimationFrame~ callback as the AST.
+5. In ~render()~, call:
+   #+begin_src typescript
+   const chunks = this.loxState.compile();
+   drawBytecode(d3.select('#lox-bytecode'), chunks, (instr) => {
+     this.onInstructionHover(instr);
+   });
+   #+end_src
+6. Implement ~onInstructionHover(instr: CompilerEvent | null)~:
+   - Clear any existing source highlight and AST highlight.
+   - If ~instr~ is non-null:
+     - Highlight the matching lexer span:
+       ~document.querySelector(`#lox-lexer span[data-start="${instr.src_offset}"]`)~
+     - Trigger AST node highlight for the same ~src_offset~ (call
+       ~drawAst~'s ~onHighlight~ hook, or dispatch a custom event that
+       ~drawAst~ subscribes to — pick whichever approach fits the existing
+       connector architecture).
+7. In ~rerun()~, call ~loxState.emptyArray('compilerEvents')~ before
+   re-running.
+
+** DONE Frontend: Style the bytecode panel
+   :PROPERTIES:
+   :files:    static/css/lox-visualizer-demo.css
+   :END:
+
+- ~#lox-bytecode~ matches the existing panel style (border, border-radius,
+  padding) like ~#lox-ast svg~.
+- ~#lox-bytecode table~: monospace font, full width, small font-size (~0.85em~).
+- ~#lox-bytecode tr:hover~: subtle highlight (e.g. ~background: rgba(86,181,194,0.15)~).
+- ~#lox-bytecode details + details~: margin between chunk sections.
+- ~#lox-bytecode summary~: styled to look like a section header.
+
+* Open questions
+
+- *Completion signal*: piggy-backing on ~parserRendered~ assumes compiler
+  events arrive before the parser CLOSE event — test this assumption and
+  adjust if needed.  A cleaner option: emit a ~{"msg_type": "compiler",
+  "action": "done"}~ sentinel from ~vm.c~ after the recursive walk.
+- *Jump operand display*: jumps emit a target offset (~jump_target~).  Should
+  we render jump targets as clickable links that scroll to the target row?
+- *Closure upvalue lines*: ~OP_CLOSURE~ is followed by upvalue descriptor
+  bytes that the existing disassembler prints separately.  Decide whether
+  to show these as sub-rows or fold them into the ~OP_CLOSURE~ row.
+- *AST highlight API*: the connector feature (~ast-token-connector.org~)
+  adds an ~onHighlight~ callback to ~drawAst~.  If that task is complete,
+  the bytecode panel can reuse it directly.  If not, we need a lighter-weight
+  mechanism (e.g., a shared observable or a direct d3 selection query).

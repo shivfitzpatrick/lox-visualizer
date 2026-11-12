@@ -1,0 +1,81 @@
+#+title: TypeScript Error Fixes
+#+date: 2026-06-18
+
+203 errors across 3 files, all from two root causes.
+
+Run =npx tsc --noEmit= to verify progress.
+
+* TODO Fix ConsoleMessage not in scope in state.ts
+
+=app/src/lox-visualizer/state/state.ts:282= —
+=error TS2304: Cannot find name 'ConsoleMessage'=
+
+Line 17 re-exports =ConsoleMessage= from =@/compiler-viz/types= but
+=export type { ... }= does not bring the name into the file's local scope. It
+is then used at line 282 inside =LoxStateProps=.
+
+Fix: import it explicitly and re-export it in a separate statement.
+
+#+begin_src typescript
+import type { ConsoleMessage } from '@/compiler-viz/types';
+export type { ConsoleMessage } from '@/compiler-viz/types';
+#+end_src
+
+Or import and then re-export from the import:
+
+#+begin_src typescript
+import type { ConsoleMessage } from '@/compiler-viz/types';
+export type { ConsoleMessage };
+#+end_src
+
+This is a one-line change. Fixes 1 error.
+
+* TODO Fix Lexeme.length missing from test fixtures
+
+202 errors in:
+- =app/src/lox-visualizer/state/state.test.ts=
+- =app/src/compiler-viz/ast.test.ts=
+
+All are the same: =error TS2741: Property 'length' is missing in type
+'{ category: ...; type: ...; start: number; text: string; }' but required in
+type 'Lexeme'=.
+
+=length= was added as a required field to the =Lexeme= interface in both
+=state/state.ts= and =compiler-viz/types.ts=. Test fixtures set lexemes
+directly via =loxState.set('lexemes', [...])=, bypassing the =lex()= method
+that populates =length= from raw lexer events. None of the code paths
+exercised by these tests reads =Lexeme.length=.
+
+** Option A — Make length optional (recommended)
+
+Change =length: number= to =length?: number= in both =Lexeme= definitions:
+- =app/src/lox-visualizer/state/state.ts= line 14
+- =app/src/compiler-viz/types.ts= line 13
+
+=length= is only meaningful when lexemes are built from raw =LexerEvent=
+data in =lex()=. Test fixtures represent already-processed lexemes and don't
+need it. Making it optional matches the actual usage contract.
+
+Two character changes. Fixes all 202 errors.
+
+** Option B — Add a test helper
+
+Create a =makeLexeme= helper in =app/src/lox-visualizer/test/sample_data.ts=
+that computes =length= from =text.length=:
+
+#+begin_src typescript
+export function L(
+    category: TokenCategory | null,
+    type: keyof typeof TokenType | null,
+    start: number,
+    text: string,
+): Lexeme {
+    return { category, type, start, text, length: text.length };
+}
+#+end_src
+
+Then rewrite all fixture arrays in both test files to use =L(...)=. Reduces
+repetition but requires touching every fixture object.
+
+Fixes 202 errors but is a larger diff. Worth doing if test readability is
+a goal.

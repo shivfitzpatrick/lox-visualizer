@@ -1,0 +1,181 @@
+#+title: Bytecode Subtree Highlight
+#+date: 2026-06-19
+
+When a block AST node is selected (e.g. ~Function~, ~If~, ~While~), highlight
+all bytecode instructions whose ~srcOffset~ falls within the selected subtree,
+not just the single instruction at ~node.start~.
+
+* Background
+
+~BytecodePanel.onSelectionChange~ currently queries:
+
+#+begin_src typescript
+tr[data-src-offset="${state.selectedStart}"]
+#+end_src
+
+For leaf nodes this is correct — the leaf's token typically maps to at least
+one instruction.  For block nodes, ~node.start~ is the keyword token (~fun~,
+~if~, …) which generates no instruction; all the body instructions carry the
+~srcOffset~ of inner statements.  The panel highlights nothing.
+
+~LexerPanel~ already solves the same problem correctly: it calls
+~collectSubtreeStarts(state.selectedAstNode)~ (from ~compiler-viz/ast.ts~)
+and highlights every token span in the subtree, marking ~node.start~ as
+primary and the rest as secondary.  The bytecode panel should mirror this
+pattern exactly — same utility, same primary/secondary distinction, different
+DOM targets (~<tr data-src-offset>~ instead of ~<span data-start>~).
+
+* Visual design
+
+| Rows | Class |
+|------+-------|
+| Instructions at ~node.start~ (if any) | ~bc-selected~ (existing — bolder / bordered) |
+| Instructions at any other subtree offset | ~bc-highlight~ (existing — dimmer fill) |
+
+~clearRowHighlight~ already clears both classes together, so no CSS changes
+are needed.
+
+For the instruction-click path (~selectedAstNode === null~), behaviour is
+unchanged: only the single ~selectedStart~ row gets ~bc-selected~.
+
+* Connector anchor
+
+The ast↔bc line currently anchors to the first ~bc-selected~ row.  With
+subtree highlighting there may be no row at ~node.start~.  Fallback: anchor
+to the first highlighted row in document order (the topmost visible ~<tr>~
+with ~bc-selected~ or ~bc-highlight~).
+
+* Tasks
+
+** DONE Replace single-offset state with subtree tracking in ~BytecodePanel~
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/panels/bytecode-panel.ts
+   :END:
+
+Replace the single private field:
+
+#+begin_src typescript
+private selectedOffset: number | null = null;
+#+end_src
+
+with two fields:
+
+#+begin_src typescript
+private selectedOffsets: Set<number> = new Set();
+private primaryOffset: number | null = null;   // node.start, or selectedStart for instr-click
+#+end_src
+
+Update ~clearRowHighlight~ to reset both:
+
+#+begin_src typescript
+private clearRowHighlight(): void {
+    panelSelection(this.container)
+        .selectAll('tr.bc-selected, tr.bc-highlight')
+        .classed('bc-selected bc-highlight', false);
+    this.selectedOffsets = new Set();
+    this.primaryOffset = null;
+}
+#+end_src
+
+** DONE Update ~onSelectionChange~ to highlight the full subtree
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/panels/bytecode-panel.ts
+   :END:
+
+Add the import:
+
+#+begin_src typescript
+import { collectSubtreeStarts } from '@/compiler-viz/ast';
+#+end_src
+
+Replace the body of ~onSelectionChange~ with two paths:
+
+#+begin_src typescript
+onSelectionChange(state: VizSelection): void {
+    this.clearRowHighlight();
+
+    if (state.selectedStart === null) {
+        this.setAnchor(null);
+        return;
+    }
+
+    if (state.selectedAstNode) {
+        // AST-selection path: highlight every instruction in the subtree.
+        const node = state.selectedAstNode;
+        const offsets = collectSubtreeStarts(node);
+        for (const offset of offsets) {
+            const rows = panelSelection(this.container)
+                .selectAll<HTMLTableRowElement, unknown>(`tr[data-src-offset="${offset}"]`);
+            rows.each(function() { this.closest('details')?.setAttribute('open', ''); });
+            rows.classed(offset === node.start ? 'bc-selected' : 'bc-highlight', true);
+        }
+        this.selectedOffsets = new Set(offsets);
+        this.primaryOffset = node.start ?? null;
+    } else {
+        // Instruction-click path: single row, unchanged behaviour.
+        const rows = panelSelection(this.container)
+            .selectAll<HTMLTableRowElement, unknown>(`tr[data-src-offset="${state.selectedStart}"]`);
+        if (rows.empty()) {
+            this.setAnchor(null);
+            return;
+        }
+        rows.each(function() { this.closest('details')?.setAttribute('open', ''); });
+        rows.classed('bc-selected', true);
+        this.selectedOffsets = new Set([state.selectedStart]);
+        this.primaryOffset = state.selectedStart;
+    }
+
+    // Anchor to the primary row, falling back to the first highlighted row.
+    this.setAnchor(this.findAnchorRow()?.getBoundingClientRect() ?? null);
+    selectionElement<HTMLElement>(
+        panelSelection(this.container)
+            .select<HTMLTableRowElement>('tr.bc-selected, tr.bc-highlight'),
+    )?.scrollIntoView({ block: 'nearest' });
+}
+#+end_src
+
+** DONE Update ~refreshAnchor~ to use ~findAnchorRow~
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/panels/bytecode-panel.ts
+   :END:
+
+Extract the anchor-row lookup into a private helper, and use it in both
+~onSelectionChange~ and ~refreshAnchor~:
+
+#+begin_src typescript
+private findAnchorRow(): HTMLElement | null {
+    if (this.primaryOffset !== null) {
+        const el = selectionElement<HTMLElement>(
+            panelSelection(this.container)
+                .select<HTMLTableRowElement>(`tr[data-src-offset="${this.primaryOffset}"]`),
+        );
+        if (el) return el;
+    }
+    // Primary offset produced no instruction — fall back to first highlighted row.
+    return selectionElement<HTMLElement>(
+        panelSelection(this.container)
+            .select<HTMLTableRowElement>('tr.bc-selected, tr.bc-highlight'),
+    );
+}
+#+end_src
+
+Update ~refreshAnchor~:
+
+#+begin_src typescript
+refreshAnchor(): void {
+    this.setAnchor(this.selectedOffsets.size > 0
+        ? (this.findAnchorRow()?.getBoundingClientRect() ?? null)
+        : null);
+    // ... existing bc-exec anchor logic unchanged ...
+}
+#+end_src
+
+* Open questions
+
+- Should selecting a ~Function~ node open the function's ~<details>~ chunk in
+  the bytecode panel and scroll to it, even when that chunk is collapsed?  The
+  current ~details.setAttribute('open', '')~ call in the loop above already
+  does this.  Confirm the UX is desirable before shipping.
+- For very large subtrees (e.g. the root ~Program~ node), many instruction
+  rows will be highlighted.  Is that useful or overwhelming?  Could gate
+  subtree highlight behind a depth threshold, but start without one.

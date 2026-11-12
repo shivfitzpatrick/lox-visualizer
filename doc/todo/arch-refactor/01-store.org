@@ -1,0 +1,128 @@
+#+title: Reactive Store
+#+date: 2026-06-18
+#+phase: 1 (foundation — parallel with 02, 03)
+
+A ~25-line, dependency-free reactive store — the single state-management
+primitive for the whole visualizer.  It holds *observable state*: the
+conceptual selection (~VisualizerSelection~) and, via a second instance, the
+derived compiler snapshot (~LoxData~; see 03).  For selection it is the single
+source of truth for "what is currently selected", replacing the six scattered
+mutable properties on ~LoxVisualizer~ (~highlightedNode~, ~highlightedEl~,
+~highlightedSpans~, ~bcHighlightEls~, ~selectedInstr~, ~focusByStart~).
+
+* Background
+
+Today every panel-coordination decision is made by reading/writing ad-hoc
+fields on the orchestrator.  Nothing keeps them consistent.  The store replaces
+this with one observable object that panels subscribe to.
+
+The shared key is ~selectedStart~ — a source character offset that already
+flows through the system as ~AstNode.start~, lexer ~data-start~, and
+~CompilerEvent.src_offset~.
+
+* Tasks
+
+** DONE Create ~lib/store.ts~
+   :PROPERTIES:
+   :files:    app/src/lib/store.ts (new)
+   :END:
+
+Define the generic store interface and a factory:
+
+#+begin_src typescript
+export interface Store<T> {
+    get(): T;
+    set(patch: Partial<T>): void;
+    subscribe(fn: (state: T) => void): () => void;  // returns unsubscribe
+}
+
+export function createStore<T extends object>(initial: T): Store<T> { /* ... */ }
+#+end_src
+
+Implementation requirements:
+
+- Hold one ~state~ object internally; ~get()~ returns it.
+- ~set(patch)~ shallow-merges ~patch~ into ~state~ and notifies subscribers
+  with the new state.
+- ~subscribe(fn)~ adds ~fn~ to a ~Set~ and returns a function that removes it.
+- Iterate over a *copy* of the subscriber set when notifying, so a subscriber
+  that unsubscribes (or subscribes) during notification doesn't corrupt the
+  iteration.
+
+** DONE Make ~set~ no-op when nothing changes
+   :PROPERTIES:
+   :files:    app/src/lib/store.ts
+   :END:
+
+This is required to prevent infinite update loops in the agreed
+~selectedAstNode~ write-back protocol (see ~00-overview.org~ → "Who owns
+selectedAstNode").
+
+In ~set~, compare each key in ~patch~ against the current value with ~===~.  If
+no key changes the state, return without notifying subscribers.  (Shallow
+equality is sufficient — selection values are primitives or object references.)
+
+** DONE Define ~VisualizerSelection~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-data.ts (preferred) OR a small types file
+   :END:
+
+#+begin_src typescript
+export interface VisualizerSelection {
+    // The source offset currently selected — the shared key all panels speak.
+    selectedStart: number | null;
+
+    // The full AST node at selectedStart, resolved by the AST panel so the
+    // lexer panel can highlight the whole subtree, not just the primary token.
+    selectedAstNode: AstNode | null;
+}
+#+end_src
+
+Place this next to the other shared types.  If ~03-lox-data.org~ is being done
+in parallel, put it in ~lox-data.ts~ and coordinate; otherwise a small
+~visualizer-selection.ts~ is fine and can be merged later.  ~AstNode~ is
+imported from ~@/lox-visualizer/ast~.
+
+Note: ~Store<T>~ itself is generic and lives in ~lib/~ (framework-agnostic);
+~VisualizerSelection~ is domain-specific and lives under ~lox-visualizer/~.
+
+** DONE Unit-test the store
+   :PROPERTIES:
+   :files:    app/src/lib/store.test.ts (new)
+   :END:
+
+Follow the existing vitest + chai style (see ~state/state.test.ts~).  Cover:
+
+- ~get()~ returns initial state.
+- ~set(patch)~ merges and ~get()~ reflects it.
+- ~subscribe~ fires on change with the merged state; the returned function
+  unsubscribes.
+- ~set~ with an unchanged value does *not* notify (loop-guard).
+- Multiple subscribers all fire; unsubscribing one leaves the others.
+- Unsubscribing inside a subscriber callback does not throw.
+
+* Design notes (settled)
+
+- *Not ~d3.dispatch~.*  Although the app uses ~d3.dispatch~ for the raw WASM
+  event stream in ~lox-core.ts~, the store deliberately does *not* build on it.
+  ~d3.dispatch~ is an event emitter (no current value, same-typename handlers
+  overwrite without unique ~.name~ suffixes, no change dedup); the store needs
+  observable-state semantics (~get()~, anonymous subscribers + unsubscribe, and
+  the loop-guard).  This is an abstraction-fit decision, not a
+  dependency-avoidance one.  See ~00-overview.org~ → "State management".
+- *No ~update~/append helper.*  The store only ever takes whole-value ~set~s.
+  Compiler data is aggregated by the orchestrator and written in one shot when a
+  run completes (see 03/08), so incremental array-append helpers are
+  unnecessary.  Keep the API to ~get~/~set~/~subscribe~.
+- *Two instances, not one combined object* (see 03, 08): a ~Store<VisualizerSelection>~
+  and a ~Store<{ data: LoxData | null }>~, so selection changes don't wake data
+  subscribers.  ~createStore~ itself stays generic and unaware of either type.
+
+* Open questions
+
+- Should ~set~ notify with the full state (current plan) or with a
+  ~(state, patch)~ pair?  Full state keeps subscribers simple; revisit only if a
+  panel needs to know precisely which key changed.
+- Deep vs shallow change detection: shallow ~===~ is intended.  ~selectedAstNode~
+  is compared by reference, which is correct because the AST panel reuses the
+  same node objects between writes within one parse.

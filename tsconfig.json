@@ -1,0 +1,11 @@
+// Solution-style config. tsserver only auto-discovers `tsconfig.json`, so this
+// file must exist and must point at every project that owns source, otherwise
+// the editor drops the unclaimed files into an inferred project with default
+// options — which is how test files lost `describe`/`it` and the `@/*` paths.
+{
+    "files": [],
+    "references": [
+	{"path": "./tsconfig.app.json"},
+	{"path": "./tsconfig.test.json"}
+    ]
+}

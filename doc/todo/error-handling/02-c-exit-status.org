@@ -1,0 +1,119 @@
+#+title: clox — Stop Exiting on Program Errors
+#+date: 2026-08-03
+#+phase: 1 (after 01)
+#+TODO: TODO NEXT IN-PROGRESS WAITING | DONE CANCELLED
+
+Make a Lox compile/runtime error an ordinary return value instead of a
+JavaScript exception, and give the frontend the result code.
+
+*This stream edits the clox repository* (~$(LOX_PROJECT)~ =
+~$(HOME)/Code/learn/cs/crafting-interpreters/clox~), not this one.
+
+* Background
+
+~clox/src/main_wasm.c~:
+
+#+begin_src c
+  EMSCRIPTEN_KEEPALIVE
+  void runSource(const char* source) {
+    initVM();
+    InterpretResult result = interpret(source);
+    if (result == INTERPRET_COMPILE_ERROR) exit(65);
+    if (result == INTERPRET_RUNTIME_ERROR) exit(70);
+  }
+#+end_src
+
+The wasm build does not set ~EXIT_RUNTIME~, so the glue has
+~noExitRuntime = true~ and ~exit()~ becomes:
+
+#+begin_example
+  exit → exitJS → err("program exited (with status: 70), but keepRuntimeAlive()
+                       is set ...")
+               → _proc_exit → quit_(code, new ExitStatus(code)) → throw
+#+end_example
+
+The exit status carried nothing the frontend read — the human-readable message
+is already on stderr via ~runtimeError~ / the compiler's error reporting, and
+reaches ~printErr~ *before* the throw.  So the exception is pure downside: it
+makes a typo indistinguishable from a segfault at the JS boundary.
+
+* Tasks
+
+** TODO Return the result instead of exiting
+   :PROPERTIES:
+   :files:    clox/src/main_wasm.c
+   :END:
+
+#+begin_src c
+  EMSCRIPTEN_KEEPALIVE
+  int runSource(const char* source) {
+    initVM();
+    return (int)interpret(source);   /* errors already reported on stderr */
+  }
+#+end_src
+
+Leave ~src/main.c~ alone — the native CLI's exit codes (65/70/64) are the
+conventional Unix behaviour and are used by the test scripts.
+
+Check whether ~freeVM()~ should be called before returning.  ~initVM()~ runs on
+every ~runSource~ call and never had a matching teardown; with ~exit()~ gone,
+nothing reclaims the previous run's objects, so repeated runs leak.  If
+~freeVM()~ is safe to call at the top of ~runSource~ (guarded for first use), do
+it there.
+
+** TODO Widen the ~cwrap~ signature
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-core.ts
+   :END:
+
+#+begin_src typescript
+  const runSource = loxModule.cwrap('runSource', 'number', ['string'])
+      as (source: string) => number;
+#+end_src
+
+Export an enum mirroring ~InterpretResult~ (~OK = 0~, ~COMPILE_ERROR~,
+~RUNTIME_ERROR~ — confirm the ordering in ~vm.h~ rather than assuming) so
+callers can branch without string-matching stderr.
+
+** TODO Use the result in the orchestrator
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+~runAndPublish~ (stream 01) keeps its ~try~ — a trap can still throw — but now
+also reads the return value.  A non-OK result is a *program* error: report it as
+such, do not touch the crash state from stream 03.
+
+This is the point where the Errors pane from ~design.org~ gets a real signal to
+title itself with ("Compile error" vs "Runtime error").
+
+** TODO Rebuild and refresh the served artifacts
+   :PROPERTIES:
+   :files:    static/js/lox-visualizer/{lox.js,lox.wasm}
+   :END:
+
+~make wasm~ in this repo runs ~make -C $(LOX_PROJECT) wasm~ and copies ~lox.js~ +
+~lox.wasm~ into ~static/js/lox-visualizer/~; Hugo republishes to ~public/js/~.
+
+Gotcha: a *third* copy exists at ~app/src/lox-visualizer/lox.js~ which ~make
+wasm~ does not touch, and it is already stale (dated March, and its contents
+differ from the ~static/~ copy).  It is not what executes — ~lox-core.ts~
+dynamically imports the absolute URL ~/js/lox-visualizer/lox.js~, i.e. the served
+copy.  Either delete the ~app/src/~ copy or add it to the ~wasm~ target's copy
+list.  Check what depends on it first (~app/src/types/lox-wasm-stub.ts~ exists
+for the type side, which suggests nothing does).
+
+** TODO Verify at the boundary
+   :PROPERTIES:
+   :files:    —
+   :END:
+
+After rebuilding, in the browser: ~var x = ;~ should produce an error message
+with *no* exception in devtools and no ~ExitStatus~ anywhere.  Deep recursion
+should still throw ~WebAssembly.RuntimeError~.  That split is the whole point of
+this stream — confirm it before starting 03.
+
+* Done when
+
+Program errors never throw; only genuine traps do.  The frontend can tell the
+two apart without parsing stderr.

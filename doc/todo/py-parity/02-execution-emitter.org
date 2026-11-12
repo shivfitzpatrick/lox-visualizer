@@ -1,0 +1,89 @@
+#+title: Execution Trace Emitter
+#+date: 2026-06-19
+#+phase: 1
+
+Extend ~emitter.py~ to execute compiled code and emit a step trace compatible
+with ~VmStep~ / ~TaggedPrint~.  See [[file:design.org][design.org]] § Execution parity.
+
+* Dependencies
+
+- Phase 0 optional but recommended (orchestrator hygiene).
+
+* Tasks
+
+** TODO Execute compiled code with sys.monitoring
+   :PROPERTIES:
+   :files: app/src/python-visualizer/emitter.py
+   :END:
+
+After ~compile()~, register ~sys.monitoring~ ~INSTRUCTION~ callback (Python
+3.12+).  On each callback, append a step record:
+
+#+begin_src python
+{"msg_type": "vm_step", "chunk": qualname, "offset": off, "stack": [...], "frames": [...]}
+#+end_src
+
+Use ~dis.get_instructions~ to resolve chunk name.  Cap at ~MAX_STEPS = 10_000~.
+
+** TODO Fallback trace for pre-3.12
+   :PROPERTIES:
+   :files: app/src/python-visualizer/emitter.py
+   :END:
+
+If ~sys.monitoring~ unavailable, use ~sys.settrace~ with
+~frame.f_trace_opcodes = True~ and ~frame.f_lasti~.
+
+** TODO Capture print output with step index
+   :PROPERTIES:
+   :files: app/src/python-visualizer/emitter.py
+   :END:
+
+Redirect ~sys.stdout~ (or wrap ~print~) during ~exec~.  Stamp each captured line
+with ~stepIndex~ = number of steps recorded so far (same ordering rule as Lox
+~doc/todo/lox-execution/07-console-playback.org~).
+
+Include ~src_offset~ when the print call's position is known.
+
+** TODO Simulate evaluation stack
+   :PROPERTIES:
+   :files: app/src/python-visualizer/emitter.py
+   :END:
+
+Maintain a list during the monitoring callback.  Apply per-opcode push/pop using
+~dis.stack_effect~ (and opcode-specific value rules for ~LOAD_CONST~,
+~LOAD_NAME~, etc.).  Map Python values to ~StackValue~ JSON (~t~, ~v~, ~name~).
+
+Build ~frames~ from ~PY_START~ / ~PY_RETURN~ monitoring events (or trace
+~call~ / ~return~).
+
+** TODO Extend PyRawData types
+   :PROPERTIES:
+   :files: app/src/python-visualizer/py-data.ts
+   :END:
+
+#+begin_src typescript
+import type { VmStep, TaggedPrint } from '@/compiler-viz/execution';
+
+export interface PyRawData {
+    // ...existing...
+    steps?: VmStep[];
+    prints?: TaggedPrint[];
+}
+#+end_src
+
+** TODO Handle runtime errors
+   :PROPERTIES:
+   :files: app/src/python-visualizer/emitter.py
+   :END:
+
+On exception during ~exec~, return partial ~steps~ / ~prints~ plus
+~{ "error": str(exc), ... }~ so static panels still render and the console shows
+the error.
+
+* Acceptance
+
+#+begin_src bash
+echo 'x = 1 + 2\nprint(x)' | python app/src/python-visualizer/emitter.py | python -m json.tool
+#+end_src
+
+Output includes non-empty ~steps~ and ~prints~ arrays with valid JSON shapes.

@@ -1,0 +1,107 @@
+#+title: Phase 2d — Move Panels to compiler-viz/panels/
+#+date: 2026-06-18
+#+phase: 2d (after 05 and 06)
+
+Move the four visualization panels from ~lox-visualizer/panels/~ to
+~compiler-viz/panels/~.  Leave re-export stubs.
+
+* Background
+
+After 05 (renderers) and 06 (shell), the panels' dependencies are all in
+~compiler-viz/~.  The panels themselves contain no Lox-specific logic — they
+render generic ~VizData~ shapes.
+
+~LexerPanel~ depends on ~TokenCategoryMap~ (injected via constructor, from
+Phase 1 / 03).  It does *not* import ~LOX_TOKEN_CATEGORY_MAP~ directly, so it
+moves cleanly.
+
+* Tasks
+
+** DONE Move ~panels/lexer-panel.ts~
+   :PROPERTIES:
+   :files: app/src/compiler-viz/panels/lexer-panel.ts (new),
+           app/src/lox-visualizer/panels/lexer-panel.ts (stub)
+   :END:
+
+Move the file.  Update imports to ~@/compiler-viz/*~ equivalents:
+
+- ~VisualizationPanel~ → ~@/compiler-viz/visualization-panel~
+- ~VizData~, ~VizDataStore~, ~VizSelection~ → ~@/compiler-viz/types~
+- ~ConnectorLayer~ → ~@/compiler-viz/connector-layer~
+- ~d3-utils~ → ~@/compiler-viz/d3-utils~
+- ~TokenCategoryMap~ → ~@/lox-visualizer/token-map~ (stays Lox-side for now)
+- ~LOX_TOKEN_CATEGORY_MAP~ → still ~@/lox-visualizer/token-map~ (default arg)
+
+Old path stub:
+
+#+begin_src typescript
+export { LexerPanel } from '@/compiler-viz/panels/lexer-panel';
+#+end_src
+
+** DONE Move ~panels/ast-panel.ts~
+   :PROPERTIES:
+   :files: app/src/compiler-viz/panels/ast-panel.ts (new),
+           app/src/lox-visualizer/panels/ast-panel.ts (stub)
+   :END:
+
+Move the file.  Update imports similarly (~VisualizationPanel~, ~VizData~,
+~VizSelection~, ~ConnectorLayer~, ~drawAst~ / ~AstNode~ / ~collectSubtreeStarts~
+all now from ~@/compiler-viz/~).
+
+Old path stub:
+
+#+begin_src typescript
+export { AstPanel } from '@/compiler-viz/panels/ast-panel';
+#+end_src
+
+** DONE Move ~panels/bytecode-panel.ts~
+   :PROPERTIES:
+   :files: app/src/compiler-viz/panels/bytecode-panel.ts (new),
+           app/src/lox-visualizer/panels/bytecode-panel.ts (stub)
+   :END:
+
+Move the file.  Update imports (~VisualizationPanel~, ~VizData~, ~VizSelection~,
+~Instruction~, ~drawBytecode~, ~d3-utils~, ~ConnectorLayer~ → ~@/compiler-viz/~).
+
+Old path stub:
+
+#+begin_src typescript
+export { BytecodePanel } from '@/compiler-viz/panels/bytecode-panel';
+#+end_src
+
+** DONE Move ~panels/console-panel.ts~
+   :PROPERTIES:
+   :files: app/src/compiler-viz/panels/console-panel.ts (new),
+           app/src/lox-visualizer/panels/console-panel.ts (stub)
+   :END:
+
+Move the file.  Update imports.
+
+Old path stub:
+
+#+begin_src typescript
+export { ConsolePanel } from '@/compiler-viz/panels/console-panel';
+#+end_src
+
+** DONE Update panel test files
+   :PROPERTIES:
+   :files: any panel-level test files
+   :END:
+
+If panel tests exist at ~lox-visualizer/panels/*.test.ts~, move or update
+their import paths.  Tests that import via the old stub path are fine as-is.
+
+* Acceptance
+
+- ~compiler-viz/panels/~ contains all four panel files.
+- Old ~lox-visualizer/panels/*~ paths are one-liner re-export stubs.
+- ~grep -r 'lox-visualizer/panels' app/src/compiler-viz/~ → no matches
+  (compiler-viz files import from within ~compiler-viz/~).
+- Vitest green.
+
+* Dependencies
+
+- [[file:05-compiler-viz-renderers.org][05]] must be merged first (~drawAst~, ~drawBytecode~, ~ConnectorLayer~,
+  ~d3-utils~ at ~compiler-viz/~ paths).
+- [[file:06-compiler-viz-shell.org][06]] must be merged first (~VisualizationPanel~, ~VizData~, ~VizSelection~
+  at ~compiler-viz/~ paths).

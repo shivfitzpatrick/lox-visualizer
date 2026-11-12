@@ -1,0 +1,142 @@
+#+TITLE: Console Panel for Lox Visualizer
+#+TODO: TODO IN-PROGRESS | DONE
+
+* Overview
+
+Add a console panel below the AST that shows output from =print= statements and
+runtime/compile errors from clox.
+
+The C side already emits what we need:
+- =printValue= emits ={"msg_type": "print", "text": "..."}= to stdout when
+  =JSON_LOG_PRINT= is defined (it is, per the Makefile).
+- =runtimeError= and compile errors go to =stderr=, which =lox-core.ts= already
+  routes to a =stderr= d3 event.
+
+No C changes are needed.
+
+** Event flow reminder
+- =lox-core.ts print()= receives a stdout line → if it starts with ={=, parses
+  and dispatches to =events.call(event.msg_type, ...)=.
+- =lox-core.ts printErr()= receives a stderr line → dispatches =stderr= event.
+- =lox-visualizer-demo.ts= listens to d3 events and drives state + rendering.
+
+** Render timing note
+Unlike the lexer (triggered by TOKEN_EOF) and AST (triggered by PROGRAM_CLOSE),
+errors can fire without either of those events (e.g. a compile error stops
+before any tokens). The console render should fire unconditionally after every
+=runSource()= call via =requestAnimationFrame=, in addition to being called from
+the main =render()= path.
+
+* Tasks
+
+** DONE Add =PrintEvent= interface to =events.ts=
+   :PROPERTIES:
+   :FILE: app/src/lox-visualizer/events.ts
+   :END:
+
+Add a typed interface for the =print= event the C code already emits.
+
+#+begin_src typescript
+export interface PrintEvent {
+    msg_type: 'print';
+    text: string;
+}
+#+end_src
+
+** DONE Add =ConsoleMessage= type and state field to =state.ts=
+   :PROPERTIES:
+   :FILE: app/src/lox-visualizer/state/state.ts
+   :END:
+
+Export a =ConsoleMessage= union type and add a =consoleMessages= array to
+=LoxStateProps= / the =LoxState= constructor.
+
+#+begin_src typescript
+export type ConsoleMessage =
+    | { type: 'print'; text: string }
+    | { type: 'error'; text: string };
+#+end_src
+
+Add =consoleMessages: ConsoleMessage[]= to =LoxStateProps= and initialize it to
+=[]= in the constructor. No other state machinery is needed — the demo reads it
+directly.
+
+** DONE Wire events, state, and rendering in =lox-visualizer-demo.ts=
+   :PROPERTIES:
+   :FILE: app/src/lox-visualizer/lox-visualizer-demo.ts
+   :END:
+
+Several sub-changes in the demo component:
+
+*** Import =ConsoleMessage= and =PrintEvent=
+
+*** Replace the =print= console.log stub with state push
+#+begin_src typescript
+// before
+lox.events.on('print', (event) => console.log('PRINT', event.text));
+
+// after
+lox.events.on('print', (event) => {
+    this.loxState.push('consoleMessages', { type: 'print', text: (event as PrintEvent).text });
+});
+#+end_src
+
+*** Add =stderr= handler
+#+begin_src typescript
+lox.events.on('stderr', (text) => {
+    this.loxState.push('consoleMessages', { type: 'error', text: text as string });
+});
+#+end_src
+
+*** Clear console messages on rerun
+Add =this.loxState.emptyArray('consoleMessages')= inside =rerun()= alongside the
+existing =emptyArray('lexerEvents')=.
+
+*** Add =displayConsole()= method
+Renders =consoleMessages= into =#lox-console= using d3 (same pattern as
+=displayLex=). Each message is a =<div>= with class =console-print= or
+=console-error=.
+
+*** Trigger console render unconditionally after each run
+In =setUp()= and =rerun()=, after =lox.exports.runSource(text)=, schedule:
+#+begin_src typescript
+window.requestAnimationFrame(() => this.displayConsole());
+#+end_src
+This catches compile and runtime errors that fire without TOKEN_EOF or
+PROGRAM_CLOSE.
+
+** DONE Add =#lox-console= div to =posts.org=
+   :PROPERTIES:
+   :FILE: content-org/posts.org
+   :END:
+
+Inside the cloxvis post's =#+BEGIN_EXPORT html= block, add after =#lox-ast=:
+
+#+begin_src html
+<div id="lox-console" class="code-block"></div>
+#+end_src
+
+** DONE Style the console panel in =lox-visualizer-demo.css=
+   :PROPERTIES:
+   :FILE: static/css/lox-visualizer-demo.css
+   :END:
+
+Give =#lox-console= the same box treatment as =#lox-lexer=:
+
+#+begin_src css
+#lox-console {
+    border: solid white 2px;
+    border-radius: 20px;
+    margin: 20px;
+    padding: 15px;
+    font-family: "JetBrains Mono", monospace;
+}
+
+.console-error {
+    color: #e74c3c;
+}
+#+end_src
+
+Print lines can inherit the default text color. Consider hiding =#lox-console=
+entirely when =consoleMessages= is empty (set =display: none= via JS, or just
+leave it empty — decide when implementing).

@@ -1,0 +1,521 @@
+.code-block {
+    font-family: "JetBrains Mono", monospace;
+}
+
+/* One layout everywhere. Rows lay panes out side by side while there is room
+   for each to keep its ~22em basis, and wrap them into a single vertical
+   column once there isn't — so a phone gets one scrollable stack of panes with
+   no breakpoint, no JS measurement, and no separate mobile shell. Wrapping is
+   driven by the row's own width, so an embedded or resized container behaves
+   the same as the page. */
+.lox-visualizer {
+    width: 100%;
+    box-sizing: border-box;
+    font-family: "JetBrains Mono", monospace;
+}
+
+.lox-visualizer-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.5em;
+    align-items: flex-start;
+    margin: 0.75em 0;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.lox-visualizer-row > .lox-pane {
+    flex: 1 1 22em;
+    min-width: 0;
+    box-sizing: border-box;
+}
+
+.lox-pane > .lox-panel {
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.lox-panel-label {
+    display: block;
+    box-sizing: border-box;
+    width: 100%;
+    margin: 0 0 0.35em 0;
+    padding-right: 20px;
+    text-align: right;
+    font-family: inherit;
+    font-size: 0.72em;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: #888;
+    user-select: none;
+    line-height: 1;
+}
+
+.lox-editor-container {
+    width: 100%;
+}
+
+.lox-visualizer .cm-editor,
+.lox-visualizer .cm-scroller,
+.lox-visualizer .cm-content,
+.lox-visualizer .cm-line {
+    font-family: "JetBrains Mono", monospace;
+}
+
+.cm-editor {
+    font-size: 1rem;
+    border-radius: 6px 6px 0 0;
+}
+
+.cm-editor.cm-focused { outline: none; }
+
+.lox-run-button {
+    display: block;
+    width: 100%;
+    padding: 0.5em 1em;
+    background: #1abc9c;
+    color: #242930;
+    border: none;
+    border-radius: 0 0 6px 6px;
+    font-family: inherit;
+    font-size: 1em;
+    font-weight: 600;
+    cursor: pointer;
+    letter-spacing: 0.05em;
+}
+
+.lox-run-button:hover {
+    background: #57cc8a;
+}
+
+/* Sample program picker — its own bar above the app grid, so its height
+   never skews the editor/lexer pane alignment. The bar div is always in
+   the DOM but empty (zero-height) unless a picker is mounted. */
+.lox-sample-picker {
+    display: flex;
+    align-items: center;
+    gap: 0.5em;
+    max-width: 24em;
+    margin: 0.75em 0;
+    font-family: "JetBrains Mono", monospace;
+}
+
+.lox-sample-picker__label {
+    color: #aaa;
+    font-size: 0.85em;
+    letter-spacing: 0.05em;
+}
+
+.lox-sample-picker__select {
+    flex: 1;
+    min-height: 44px;
+    padding: 0 2.2em 0 0.75em;
+    background-color: #242930;
+    color: #f8f8f0;
+    border: 1px solid #444;
+    border-radius: 8px;
+    font-family: inherit;
+    font-size: 0.9em;
+    cursor: pointer;
+    appearance: none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%23aaa' stroke-width='1.5'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 0.75em center;
+}
+
+.lox-sample-picker__select:hover {
+    border-color: #56b5c2;
+    background-color: rgba(86, 181, 194, 0.15);
+}
+
+.lox-sample-picker__select:focus-visible {
+    outline: 2px solid #56b5c2;
+    outline-offset: 2px;
+}
+
+.lox-sample-picker__select option {
+    background: #1a1f27;
+    color: #f8f8f0;
+}
+
+.code-item {
+    display: inline;
+    white-space: pre-wrap;
+}
+
+.code-item.code-token {
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 3px;
+    padding: 0 2px;
+}
+
+.code-item.code-token:hover {
+    border-color: rgba(255, 255, 255, 0.3);
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.code-item.code-highlighted {
+    background: #242930;
+    border-radius: 4px;
+    padding: 1px 3px;
+}
+
+.code-item.code-primary {
+    border: 1px solid #56b5c2;
+}
+
+.node {
+    fill: steelblue;
+    stroke: none;
+}
+
+.link {
+    fill: none;
+    stroke: #ccc;
+    stroke-width: 1px;
+}
+
+.lox-panel--lexer,
+.lox-panel--ast,
+.lox-panel--console,
+.lox-panel--bytecode,
+.lox-panel--stack,
+.lox-editor-box {
+    border: solid white 2px;
+    border-radius: 20px;
+    padding: 15px;
+}
+
+.lox-panel--console {
+    font-family: inherit;
+}
+
+/* Shown while no data has been rendered into the pane yet */
+.lox-panel[data-empty] {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 60px;
+}
+.lox-panel[data-empty]::after {
+    content: '—';
+    color: #444;
+    font-size: 1.2em;
+}
+
+.console-error {
+    color: #e74c3c;
+}
+
+.console-selectable {
+    cursor: pointer;
+}
+
+.lox-panel--console .console-selected {
+    background: rgba(86, 181, 194, 0.22);
+    outline: 1px solid rgba(86, 181, 194, 0.55);
+    border-radius: 2px;
+}
+
+.lox-editor-box {
+    border-radius: 20px 20px 0 0;
+}
+
+.lox-panel--ast svg {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+}
+
+/* Bytecode + stack sit in the same row; stack height is bounded by bytecode. */
+.lox-visualizer-row:has(.lox-panel--bytecode) {
+    align-items: stretch;
+}
+
+/* Bytecode panel */
+.lox-panel--bytecode {
+    overflow-y: auto;
+    overflow-x: auto;
+    min-height: 200px;
+    max-height: 450px;
+}
+
+.lox-panel--bytecode details + details {
+    margin-top: 1em;
+}
+
+.lox-panel--bytecode summary.bc-chunk-name {
+    font-family: inherit;
+    font-size: 0.9em;
+    font-weight: 600;
+    color: #1abc9c;
+    cursor: pointer;
+    padding: 2px 0;
+}
+
+.bc-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: inherit;
+    font-size: 0.8em;
+    margin-top: 0.5em;
+}
+
+.bc-table tr {
+    cursor: pointer;
+}
+
+.bc-table tr:hover {
+    background: rgba(86, 181, 194, 0.12);
+}
+
+.bc-table tr.bc-selected {
+    background: rgba(86, 181, 194, 0.22);
+    outline: 1px solid rgba(86, 181, 194, 0.55);
+}
+
+.bc-table td {
+    padding: 1px 8px 1px 0;
+    vertical-align: top;
+    white-space: nowrap;
+}
+
+.bc-offset { color: #666; min-width: 3em; }
+.bc-line   { color: #666; min-width: 2.5em; text-align: right; padding-right: 1em; }
+.bc-op     { color: #56b5c2; min-width: 16em; }
+.bc-operand { color: #f8f8f0; }
+
+.bc-table thead th {
+    position: sticky;
+    top: 0;
+    background: var(--panel-bg, #242930);
+    color: #888;
+    font-weight: normal;
+    font-size: 0.9em;
+    padding: 2px 8px 4px 0;
+    text-align: left;
+}
+
+tr.bc-executing td:first-child::before {
+    content: '►';
+    margin-right: 4px;
+    color: #f90;
+}
+
+/* Stack panel */
+.lox-panel--stack {
+    overflow-y: auto;
+    overflow-x: auto;
+    min-height: 200px;
+}
+
+.stack-empty {
+    color: #666;
+    font-style: italic;
+    margin: 0;
+}
+
+.stack-table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 0.9em;
+}
+
+.stack-table td {
+    padding: 2px 8px 2px 0;
+    vertical-align: middle;
+    white-space: nowrap;
+}
+
+.stack-slot { }
+
+.stack-slot:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.stack-frame-label td {
+    color: #888;
+    font-size: 0.85em;
+    padding-top: 6px;
+    padding-bottom: 2px;
+    letter-spacing: 0.04em;
+}
+
+.stack-frame-boundary td {
+    border-top: 1px solid #444;
+    padding: 0;
+    height: 0;
+}
+
+.stack-idx  { color: #666; min-width: 3em; }
+.stack-type { color: #56b5c2; min-width: 5em; }
+.stack-val  { color: #f8f8f0; }
+
+/* Playback controls */
+.lox-panel--playback {
+    border: solid white 2px;
+    border-radius: 20px;
+    padding: 15px;
+}
+
+.lox-panel--playback.execution-active {
+    border-color: #f90;
+}
+
+.playback-controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.playback-controls button {
+    background: none;
+    border: 1px solid #555;
+    border-radius: 4px;
+    color: #f8f8f0;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 0.85em;
+    padding: 3px 7px;
+    line-height: 1;
+}
+
+.playback-controls button:hover:not(:disabled) {
+    background: rgba(86, 181, 194, 0.15);
+    border-color: #56b5c2;
+}
+
+.playback-controls button:disabled {
+    color: #555;
+    cursor: default;
+}
+
+.pb-scrub {
+    flex: 1 1 120px;
+    min-width: 80px;
+    accent-color: #1abc9c;
+}
+
+.pb-counter {
+    font-size: 0.8em;
+    color: #888;
+    white-space: nowrap;
+}
+
+/* Cross-panel hover highlights */
+.lox-panel--lexer span.bc-highlight {
+    background: rgba(86, 181, 194, 0.25);
+    border-radius: 2px;
+    outline: 1px solid rgba(86, 181, 194, 0.6);
+}
+
+.lox-panel--ast g.bc-highlight rect {
+    stroke: #56b5c2 !important;
+    stroke-width: 2px;
+}
+
+.lox-panel--ast g.ast-executing rect {
+    stroke: #f90 !important;
+    stroke-width: 2px;
+}
+
+/* === Touch input === */
+
+/* Keyed on the pointing device, not on width: a touch screen needs 44px
+   targets (WCAG 2.5.5) and >=16px inputs (smaller ones make iOS auto-zoom)
+   whether or not the panes happen to be stacked. */
+@media (pointer: coarse) {
+    .lox-visualizer .cm-editor,
+    .lox-visualizer .cm-content {
+        font-size: 16px;
+    }
+
+    .lox-visualizer .playback-controls button {
+        min-height: 44px;
+        min-width: 44px;
+        padding: 8px 12px;
+    }
+
+    .lox-visualizer .pb-scrub {
+        min-height: 44px;
+    }
+}
+
+/* === AST Nav Controls (Phase 3) === */
+
+.lox-panel--ast {
+    position: relative;
+}
+
+/* Nav controls overlay the AST panel edges instead of sitting below the tree */
+.ast-nav-controls {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+}
+
+.ast-nav-controls__btn {
+    position: absolute;
+    pointer-events: auto;
+    min-height: 44px;
+    min-width: 44px;
+    background: rgba(36, 41, 48, 0.75);
+    backdrop-filter: blur(4px);
+    border: 1px solid #555;
+    border-radius: 6px;
+    color: #ccc;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 1.1em;
+    line-height: 1;
+}
+
+.ast-nav-controls__btn:hover:not(:disabled) {
+    border-color: #56b5c2;
+    color: #56b5c2;
+}
+
+.ast-nav-controls__btn:disabled {
+    opacity: 0.35;
+    pointer-events: none;
+}
+
+.ast-nav-controls__btn--up    { top: 8px;    left: 50%; transform: translateX(-50%); }
+.ast-nav-controls__btn--left  { left: 8px;   top:  50%; transform: translateY(-50%); }
+.ast-nav-controls__btn--right { right: 8px;  top:  50%; transform: translateY(-50%); }
+.ast-nav-controls__btn--down  { bottom: 8px; left: 50%; transform: translateX(-50%); }
+
+/* Python visualizer loading state */
+.py-loading .lox-run-button {
+    opacity: 0.4;
+    pointer-events: none;
+}
+.py-loading .lox-run-button::after {
+    content: ' (loading\2026)';
+    font-size: 0.8em;
+}
+
+/* Lox WASM run indicator */
+[data-running] .lox-run-button {
+    opacity: 0.5;
+    pointer-events: none;
+}
+[data-running] .lox-run-button::after {
+    content: ' \2026';
+    font-size: 0.8em;
+}
+
+/* === Accessibility: focus rings === */
+
+.ast-nav-controls__btn:focus-visible {
+    outline: 2px solid #56b5c2;
+    outline-offset: 2px;
+}
+
+.lox-panel--ast svg:focus-visible {
+    outline: 2px solid rgba(86, 181, 194, 0.6);
+    outline-offset: 2px;
+}

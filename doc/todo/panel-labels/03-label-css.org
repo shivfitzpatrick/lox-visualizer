@@ -1,0 +1,115 @@
+#+title: Panel Label CSS
+#+date: 2026-06-19
+#+phase: 2 (after 02)
+
+Style ~.lox-panel-label~ and retarget row flex rules from ~.lox-panel~ to
+~.lox-pane~.
+
+* Background
+
+Pane chrome uses ~border-radius: 20px~ on most panels (~static/css/lox-visualizer.css~
+lines ~80–88~).  Labels should sit above the border box, right-aligned, with
+~padding-right: 20px~ so the text's right edge aligns with the start of the
+top-right corner curve — not flush with the row edge.
+
+Depends on: ~.lox-pane~ / ~.lox-panel-label~ DOM from
+[[file:02-pane-wrapper-dom.org][02-pane-wrapper-dom.org]].
+
+* Tasks
+
+** DONE Retarget row flex from ~.lox-panel~ to ~.lox-pane~
+   :PROPERTIES:
+   :files:    static/css/lox-visualizer.css
+   :END:
+
+Replace:
+
+#+begin_src css
+.lox-visualizer-row > .lox-panel {
+    flex: 1 1 0;
+    min-width: 0;
+    box-sizing: border-box;
+}
+#+end_src
+
+With the same rules on ~.lox-visualizer-row > .lox-pane~.  The inner
+~.lox-panel~ fills the wrapper width (~width: 100%~ if needed).
+
+** DONE Base label styles
+   :PROPERTIES:
+   :files:    static/css/lox-visualizer.css
+   :END:
+
+#+begin_src css
+.lox-panel-label {
+    display: block;
+    box-sizing: border-box;
+    width: 100%;
+    margin: 0 0 0.35em 0;
+    padding-right: 20px;   /* match pane border-radius */
+    text-align: right;
+    font-family: inherit;
+    font-size: 0.72em;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: #888;
+    user-select: none;
+    line-height: 1;
+}
+#+end_src
+
+Tune ~font-size~ and ~margin-bottom~ after visual QA in 04.
+
+** DONE Row spacing adjustment
+   :PROPERTIES:
+   :files:    static/css/lox-visualizer.css
+   :END:
+
+Labels add height above each pane.  Options:
+
+1. Reduce ~.lox-visualizer-row~ top ~margin~ slightly (~1em~ → ~0.75em~) so
+   overall vertical rhythm stays similar.
+2. Leave row margin unchanged and accept a bit more scroll.
+
+Prefer (1) if the page feels too airy after labels land.
+
+** DONE Per-kind tweaks (if needed)
+   :PROPERTIES:
+   :files:    static/css/lox-visualizer.css
+   :END:
+
+| Kind | Quirk | Likely fix |
+|------+-------+------------|
+| ~editor~ | Border only on ~.lox-editor-box~ (top corners); run button below | Label above shell is fine; no extra rule |
+| ~console~ | Hidden when empty (~:not(:empty)~) | Label still visible on empty shell — OK (signals where output will appear) |
+
+AST border now lives on ~.lox-panel--ast~ (see [[file:00-ast-shell-border.org][00-ast-shell-border.org]]),
+so the label aligns with the same chrome as other panes.  Only add per-kind
+rules if visual QA finds misalignment; start with the shared ~.lox-panel-label~
+block.
+
+** DONE Bytecode row stretch
+   :PROPERTIES:
+   :files:    static/css/lox-visualizer.css
+   :END:
+
+The existing rule:
+
+#+begin_src css
+.lox-visualizer-row:has(.lox-panel--bytecode) {
+    align-items: stretch;
+}
+#+end_example
+
+Still matches (bytecode panel is a descendant).  Verify stack + bytecode labels
+align at the same baseline when row stretches — both labels are at the top of
+their ~.lox-pane~ wrappers, so no change expected.
+
+* Acceptance
+
+- Labels appear above every pane in the cloxvis post layout.
+- Right edge of label text visually meets the pane's rounded corner (± a few px).
+- Side-by-side panes (editor+lexer, bytecode+stack) each have their own label
+  aligned to that pane's column.
+- No regression to pane borders, AST svg sizing, or bytecode/stack row stretch.

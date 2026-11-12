@@ -1,0 +1,276 @@
+#+title: Container Mount — One Mount Mechanism, Python Unpublished
+#+date: 2026-08-12
+#+phase: follows 02/03 (samples store + picker must exist first)
+#+TODO: TODO NEXT IN-PROGRESS WAITING | DONE CANCELLED
+
+~app/src/index.ts~ becomes the Vite entry and mounts the Lox
+visualizer into ~#viz-lox-container~ on ~/visualizers~.
+
+The Python visualizer is *unpublished, not deleted* — it is work in
+progress.  Its substance (~py-core~, ~py-data~, ~emitter.py~, fixtures,
+tests) is untouched.  What goes is only its *mounting mechanism*: the
+code-anchor bootstrap it shares with Lox.  ~PythonVisualizer~ converts
+to the same container mount in the same pass, so both visualizers have
+one bootstrap shape and the anchor API can be deleted outright.
+
+Direction this is heading (not in scope here): the language tabs move
+into the Vite app, and ~index.ts~ mounts both visualizers into their
+containers.  Converting Python now is what makes that a small change
+later.
+
+* Background
+
+Until now the ~<pre class="language-nil">~ block in
+~content/visualizers.md~ did *two* jobs:
+
+1. it was the *mount point* — ~mountVisualizer()~ replaced the ~<pre>~
+   with the built layout root;
+2. its text was the *initial editor document*.
+
+The page has already been rewritten (uncommitted, in the working tree):
+the language tabs, the Python section and both fenced code blocks are
+gone, replaced by
+
+: <script src="/app/index.js" type="module" data-code="#viz-lox .language-nil"></script>
+: <div id="viz-lox-container"></div>
+
+So the two jobs now split: the mount point is the empty ~div~, and the
+initial document comes from the samples store added in ~02~.  Nothing
+below changes the layout DOM, the stores, the panels or the connector
+layer — only how the apps are bootstrapped.
+
+This also finishes the bootstrap extraction that
+~01-prereq-build-entry.org~ asked for: ~index.ts~ *is* the ~main.ts~
+that doc wanted, so ~lox-visualizer.ts~ finally loses its self-boot
+tail and becomes importable without mounting anything.
+
+* Supersedes
+
+~00-overview.org~ decision (2026-08-11): "the page-scraped initial doc
+(fenced block in ~content/visualizers.md~) stays the initial editor
+content".  There is no fenced block any more; the default sample *is*
+the initial content, and ~DEFAULT_SAMPLE_LABEL~ inverts from "must
+match the page" to "is whatever the store's first entry is".
+
+* Tasks
+
+** DONE Add a container mount to ~mount.ts~
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/mount.ts, app/src/compiler-viz/mount.test.ts
+   :END:
+
+~buildLayoutDOM()~ already does the real work; ~mountVisualizer()~ only
+wraps it with code-block archaeology.  Add the sibling:
+
+#+begin_src typescript
+/** Mount the layout DOM inside a page-provided container. */
+export function mountVisualizerInto(container: HTMLElement, layout: VisualizerLayout) {
+    const { root, containers } = buildLayoutDOM(layout);
+    container.replaceChildren(root);   // idempotent if index.ts ever re-mounts
+    return { root, containers };
+}
+#+end_src
+
+Once *both* visualizers are converted (below), delete the anchor path:
+~mountVisualizer~, ~findCodeAnchor~, ~resolveCodeAnchor~,
+~extractSampleCode~, ~warnLegacyPanelSiblings~, and their tests in
+~mount.test.ts~ (including the two-visualizer scoped-selector test at
+~mount.test.ts:76~ — scoping by selector is what containers now do).
+Drop ~sampleCode~ from ~MountResult~ (~layout.ts:118~), or drop
+~MountResult~ entirely and let ~mountVisualizerInto~ own its return
+type.
+
+** DONE Let the samples store own the initial document
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/samples/index.ts, app/src/lox-visualizer/samples/index.test.ts
+   :END:
+
+~DEFAULT_SAMPLE_LABEL~ currently exists to *match* the page's
+hardcoded sample.  Invert it:
+
+#+begin_src typescript
+export const defaultSample = loxSamples[0];        // Loop printer
+export const DEFAULT_SAMPLE_LABEL = defaultSample.label;
+#+end_src
+
+The picker's "no sample matches → disabled placeholder" branch
+(~sample-picker.ts:31~) then never fires on this page, but stays
+correct for any other caller; leave it.
+
+** DONE ~LoxVisualizer~ takes a container, not a selector
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+Replace ~fromPage()~ with a mount that receives what it needs:
+
+#+begin_src typescript
+static mount(container: HTMLElement, initialDoc: string, layout = DEFAULT_LAYOUT): LoxVisualizer {
+    const { root, containers } = mountVisualizerInto(container, layout);
+    // ...unchanged from here: stores, uiStore, connectors, registry,
+    // ctx.initialDoc = initialDoc, PaneSwitcher, SamplePicker, new LoxVisualizer(...)
+}
+#+end_src
+
+- It no longer returns ~null~ — there is no anchor to miss, and the
+  caller checks the container.
+- ~this.sampleCode~ is just ~initialDoc~ (still the fallback in
+  ~getText()~ when the layout has no editor slot).
+- Delete the self-boot tail (~lox-visualizer.ts:435-436~) and ~export~
+  the class.
+
+** DONE ~PythonVisualizer~ gets the same mount
+   :PROPERTIES:
+   :files:    app/src/python-visualizer/python-visualizer.ts, app/src/python-visualizer/sample.py
+   :END:
+
+Mechanical mirror of the Lox change — its ~fromPage()~
+(~python-visualizer.ts:113-168~) is nearly line-for-line the same:
+
+#+begin_src typescript
+static mount(container: HTMLElement, initialDoc: string, layout = DEFAULT_LAYOUT): PythonVisualizer
+#+end_src
+
+- Drop ~PYTHON_SCRIPT_FRAGMENT~, the ~findEntryScript~ /
+  ~mountOptionsFromScript~ / ~findCodeAnchor~ / ~mountVisualizer~
+  imports and the ~'.language-python'~ default selector.
+- Delete the self-boot tail (last two lines) and ~export~ the class.
+  Nothing imports it yet — that is the point: it stays out of the
+  published bundle until it is ready, without rotting.
+- Initial document: it no longer scrapes the post, so add
+  ~app/src/python-visualizer/sample.py~ and import it ~?raw~
+  (precedent: ~emitter.py?raw~).  A full samples store mirroring
+  ~lox-visualizer/samples/~ can wait until the feature is published; a
+  single default is enough for WIP.
+
+When the tabs move into the app, ~index.ts~ mounts this into
+~#viz-python-container~ exactly as it mounts Lox.
+
+** DONE Retire the script-tag options path
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/layout.ts, app/src/compiler-viz/layout.test.ts
+   :END:
+
+With both visualizers converted there are no callers left.  The page's
+script tag is ~/app/index.js~, which no longer matches
+~LOX_VISUALIZER_SCRIPT_FRAGMENT~ anyway, so ~data-layout~ / ~data-code~
+would silently stop working.  Delete ~findEntryScript~,
+~mountOptionsFromScript~, the fragment constant and
+~MountOptions.codeSelector~; keep the ~layout~ argument (tests use it).
+~parseDataLayout~ can go with them, or stay if a future post wants a
+compact layout override.
+
+Per-visualizer layout now lives where the mount call is, in
+~index.ts~ — which is also where tab state will live.
+
+** DONE Write ~app/src/index.ts~
+   :PROPERTIES:
+   :files:    app/src/index.ts
+   :END:
+
+#+begin_src typescript
+import { LoxVisualizer } from '@/lox-visualizer/lox-visualizer';
+import { defaultSample } from '@/lox-visualizer/samples';
+
+const container = document.getElementById('viz-lox-container');
+if (!container) {
+    console.warn('lox-visualizer: no #viz-lox-container on the page');
+} else {
+    defaultSample.load()
+        .then((text) => LoxVisualizer.mount(container, text).setUp())
+        .catch((e) => console.error('lox-visualizer: failed to start', e));
+}
+#+end_src
+
+Lox only, for now.  Python is deliberately not imported here: an
+unreferenced module is not bundled, so the published payload carries no
+Pyodide code.  Adding it later is one ~getElementById~ + one ~mount~,
+next to whatever owns the tabs.
+
+The default sample loads through the same ~import.meta.glob('*.lox',
+?raw)~ path the picker uses, so there is one loading mechanism rather
+than two.  Top-level ~await~ works equally well if preferred.
+
+** DONE Single Vite input
+   :PROPERTIES:
+   :files:    vite.config.js
+   :END:
+
+#+begin_src javascript
+input: { index: resolve(__dirname, 'app/src/index.ts') },
+#+end_src
+
+The key names the output file, so this emits ~app/dist/index.js~ →
+served at ~/app/index.js~ (Hugo mounts ~app/dist~ at ~static/app~),
+which is what the page already requests.  Removing the
+~python-visualizer/python-visualizer~ input is what unpublishes Python;
+the source stays in the tree, typechecked by ~tsconfig~ and covered by
+its vitest suites.
+
+Keep the pyodide ~external~ regex — dead config while Python is out of
+the graph, but it is the setting that will be needed when it returns,
+and it documents why the CDN import is not bundled.  Keep the
+~/js/lox-visualizer/lox.js~ external and the vitest alias untouched.
+
+Reminder from ~01~: a running ~make dev~ (~vite build --watch~) does
+not reload ~vite.config.js~ — restart it.
+
+** DONE Page markup
+   :PROPERTIES:
+   :files:    content/visualizers.md, content/posts/pyvis.md, content-org/posts.org
+   :END:
+
+- ~content/visualizers.md~: remove the now-meaningless
+  ~data-code="#viz-lox .language-nil"~ from the script tag.  The rest
+  of the rewritten page is already right.
+- ~content/posts/pyvis.md~: set ~draft = true~.  It loads
+  ~/app/python-visualizer/python-visualizer.js~, which stops being
+  emitted; leaving it published would 404.  Its ~.language-python~
+  block can stay as the seed for ~sample.py~.
+
+** DONE Leave the tab machinery alone (note only)
+   :PROPERTIES:
+   :files:    static/js/visualizers-page.js, layouts/visualizers.html, static/css/lox-visualizer.css
+   :END:
+
+~static/js/visualizers-page.js~ (tab switching + lazy panel-script
+injection) is inert now — it early-returns when no ~[data-viz-tab]~
+elements exist — and the ~.viz-tab~ / ~.viz-tabs~ CSS is unused.  Both
+are superseded by the planned in-app tabs, so deleting them belongs to
+*that* stream, not this one.  Recorded here so the dead code is not
+mistaken for a loose end.
+
+* Done when
+
+- ~make build-vite~ emits ~app/dist/index.js~ and no
+  ~python-visualizer~ output.
+- ~/visualizers~ loads, the editor opens on "Loop printer", the
+  dropdown swaps programs, and Run + playback work.
+- ~make test~ and ~make typecheck~ pass — including the Python suites,
+  which must keep passing even though nothing mounts them.
+- ~grep -rn 'findCodeAnchor\|mountVisualizer(' app/src~ is empty.
+
+* Outcome (2026-08-12)
+
+Landed as planned, with two deviations:
+
+- ~parseDataLayout~ *kept* (unused for now).  It is pure, tested, and
+  the obvious parser for a ~data-layout~ attribute on the container div
+  or on future tab config; only the DOM-script coupling was deleted.
+- ~LoxVisualizer.sampleCode~ renamed to ~initialDoc~ so both
+  visualizers name the field the same thing.
+
+Verified: ~make typecheck~ clean; ~vite build~ emits ~app/dist/index.js~
+(978 kB) plus the five lazy sample chunks and no ~python-visualizer~
+output; the page rendered headless (chromium, static harness over
+~app/dist~ + ~static/~) mounts ~.lox-visualizer~ inside
+~#viz-lox-container~, opens on "Loop printer", compiles through WASM
+(bytecode pane full of ~OP_*~) and reaches ~data-execution-active~ with
+no console errors.
+
+* Net effect
+
+One ~6-line function in ~mount.ts~, two static factories reshaped
+alike, a 12-line entry file — minus the code-anchor and script-attribute
+machinery.  Python keeps every line that does compiler work and loses
+only the bootstrap it was going to lose anyway.

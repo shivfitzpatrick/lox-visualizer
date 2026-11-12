@@ -1,0 +1,251 @@
+#+title: Lox Visualizer — Feature Summary
+#+date: 2026-07-27
+
+A snapshot of what the visualizer does today. Complements
+=doc/lox-visualizer-architecture.org= (2026-06-18), which describes the design
+direction — the refactor it proposed has landed, and the shared machinery now
+lives under =app/src/compiler-viz/= with language adapters in
+=app/src/lox-visualizer/= and =app/src/python-visualizer/=.
+
+* At a glance
+
+An in-page, interactive view of a clox program moving through lexing, parsing,
+compilation, and VM execution. It mounts itself onto a sample code block in a
+Hugo post, runs the real clox compiler as WASM in the browser, and renders every
+stage as a linked panel. Clicking anything in one panel highlights the
+corresponding thing in every other panel.
+
+* Panels
+
+Seven pane kinds, each a =Component= with its own lifecycle.
+
+| Kind       | Label     | What it shows                                                   |
+|------------+-----------+-----------------------------------------------------------------|
+| =editor=   | Source    | CodeMirror 6 editor + Build button                              |
+| =lexer=    | Lexer     | Source tokens as coloured, clickable spans                      |
+| =ast=      | Parser    | d3 tree of the parse, zoom/pan/keyboard navigable               |
+| =bytecode= | Bytecode  | Per-chunk instruction tables (offset / line / op / operand)     |
+| =stack=    | Stack     | VM value stack at the current step, split by call frame         |
+| =playback= | Playback  | Transport controls over the recorded execution trace            |
+| =console=  | Output    | Program stdout (print lines) and stderr errors                  |
+
+** Editor
+
+- CodeMirror 6 with =basicSetup=.
+- Seeded from the sample code block in the post.
+- A *Build* button re-runs the WASM compiler on the edited text; all panels
+  re-render from the new run.
+
+** Lexer
+
+- One =span.code-item= per token, coloured by token *category* (keyword,
+  identifier, literal, operator, paren, brace) rather than by raw token type —
+  the category map is per-language.
+- Only categorised tokens are clickable; whitespace and EOF are inert.
+- On selection, highlights the whole selected AST subtree's spans, with the
+  primary token distinguished (=code-primary= vs =code-highlighted=).
+
+** AST
+
+- d3 =tree= layout, rendered to SVG, with link labels showing each child's
+  relation name (=childType=).
+- Nodes display type, =name= attribute, and parameter lists.
+- Zoom and pan (d3-zoom, scale extent 0.2–2). A user-initiated zoom gesture
+  clears the selection.
+- Click-to-focus: clicking a node animates the viewport to centre it (400 ms),
+  honouring =prefers-reduced-motion=.
+- Keyboard navigation with arrow keys — parent / first child / previous sibling
+  / next sibling — where siblings mean "same depth", so navigation works across
+  subtree boundaries.
+- On-screen D-pad (=AstNavControls=) mirroring the arrow keys, with per-direction
+  buttons disabled when the move isn't available. It avoids stealing focus so
+  keyboard nav keeps working after a click.
+- Offset → node resolution (=findNodeForOffset=) with a three-tier preference:
+  exact =start= match, then a node that owns the offset as an *attribute*
+  position, then a node whose *declaration header* spans the offset. Deepest
+  match wins in each tier.
+- =ResizeObserver= with a 100 ms debounce re-lays out and refocuses on resize.
+
+** Bytecode
+
+- One collapsible =<details>= per chunk (first chunk open by default); rows carry
+  =data-chunk=, =data-offset=, =data-src-offset=.
+- Operand formatting is op-aware: jump targets render as =→ N=, constants as
+  ='name'= with an arg count for calls, plain args as numbers.
+- Selection highlights every instruction in the selected AST subtree, with the
+  subtree root's rows marked =bc-selected= and the rest =bc-highlight= —
+  mirroring the lexer's primary/secondary split.
+- Auto-expands the containing =<details>= and scrolls the anchor row into view.
+- *Parameter tracing*: selecting a function/method parameter in the AST
+  highlights every =OP_GET_LOCAL= / =OP_SET_LOCAL= against that parameter's stack
+  slot. The Python adapter does the same by name over =LOAD_FAST=/=STORE_FAST=/
+  =LOAD_DEREF= and friends.
+
+** Stack
+
+- Renders the VM value stack for the currently selected execution step,
+  top-of-stack first.
+- Grouped by call frame: each frame gets a function-name label row, with
+  boundary rows between frames.
+- Formats all clox value types — nil, bool, number, string (truncated at 20
+  chars), function (=name/arity=), native, class, instance, bound method,
+  upvalue.
+
+** Playback
+
+- Transport: first / step back / play-pause / step forward / last.
+- Range scrubber over the whole trace plus a =Step n / N= counter.
+- Auto-play at 200 ms per step, stopping at the end of the trace.
+- Buttons disable at the trace boundaries; hides itself entirely when there is
+  no trace.
+
+** Console
+
+- Print lines and stderr errors, rendered as separate classes.
+- Print lines carrying a source offset are clickable, selecting the
+  =OP_PRINT= site in the bytecode.
+- *Time-aware*: when an execution trace exists, only print lines emitted at or
+  before the current step are shown, so output accumulates as you scrub.
+
+* Cross-panel linking
+
+** Shared selection
+
+A single =VizSelection= store — ={ selectedStart, selectedAstNode }= — is the
+whole selection model. Panels never call each other; they write a source offset
+and read back.
+
+- Clicking a lexer token, an AST node, a bytecode row, or a console line all
+  write =selectedStart=.
+- The AST panel is the resolver: it turns a bare offset into the AST node and
+  writes it back, which is what lets the lexer and bytecode panels highlight a
+  whole subtree.
+- Clicking anywhere that isn't a selectable element deselects everything;
+  selectable elements =stopPropagation= so the document-level handler only sees
+  genuine deselects.
+
+** Connector lines
+
+A per-instance =ConnectorLayer= draws dashed SVG lines between panels over a
+fixed, full-viewport, pointer-events-none overlay.
+
+- Panels publish an anchor rect by id; the layer draws a line whenever both
+  endpoints of a declared pair are set.
+- Declared topology, not all-to-all: =ast↔lexer=, =ast↔bytecode=,
+  =console↔bytecode= for selection (blue), plus =ast-exec↔bc-exec= for execution
+  (orange).
+- Lines are only declared when *both* endpoint panes exist in the active layout.
+- Anchors are re-measured and lines redrawn on window scroll and resize.
+- The AST panel suppresses its execution anchor when the highlighted node has
+  been zoomed outside the visible panel area, so lines never point off-screen.
+
+** Focus modes
+
+Selection mode and execution mode are mutually exclusive. Selecting anything
+deactivates execution highlighting; activating playback clears the selection.
+Entering execution mode is a click on the playback panel.
+
+* Execution tracing
+
+- The WASM build emits a =vm_step= event per instruction, carrying chunk, offset,
+  the full value stack, and the call-frame list.
+- Steps are buffered during the run and published as one immutable trace, capped
+  at 10,000 steps — hitting the cap logs a console error suggesting an infinite
+  loop.
+- Print events are tagged with the step index at which they fired, which is what
+  makes the console time-aware.
+- At the current step, the bytecode panel marks the executing row
+  (=bc-executing=, auto-expanded and scrolled into view) and the AST panel marks
+  the corresponding node (=ast-executing=) by mapping instruction → =srcOffset=,
+  panning the tree to it without disturbing the selection.
+
+* Layout system
+
+** Declarative layouts
+
+A layout is rows of pane kinds. The default:
+
+#+begin_src text
+editor,lexer | ast | playback | bytecode,stack | console
+#+end_src
+
+- Per-post override via =data-layout= on the entry =<script>= tag, or
+  =fromPage({ layout })= in tests.
+- Validated at build time: unknown kinds and duplicates throw; empty rows are
+  dropped.
+- DOM is generated from the layout — the post supplies only a code block and a
+  script tag. =mountVisualizer= replaces the =<pre>= in place, and warns if
+  legacy hand-planted =#lox-*= divs are still in the markup.
+- Sample-code anchor selector is configurable (default =.language-nil=).
+
+** Responsive behaviour
+
+- Three modes by root width: desktop (≥1024), tablet (≥768), mobile.
+- On mobile, only two panes show: a *focus* pane and a *companion* pane, chosen
+  by a preset table (editor→lexer, ast→lexer, bytecode→ast, stack→bytecode,
+  console→bytecode, …).
+- A tab bar (=PaneSwitcher=) appears in mobile mode, with the first five panes as
+  tabs and the rest under a "More" menu.
+- Vertical swipe swaps focus and companion panes. Swipes starting on the AST SVG
+  are ignored so d3's own drag/zoom keeps working.
+- Focus pane persists across page loads in =sessionStorage=.
+- Connector lines are hidden in mobile mode.
+- Virtual-keyboard handling: when the editor is focused on mobile, the root pads
+  itself by the keyboard height via =visualViewport=.
+
+* Architecture
+
+- *Stores* — a ~35-line =createStore= with reference-equality change detection.
+  Four of them: data (derived compiler snapshot), selection, execution, console;
+  plus a UI store for layout/focus state.
+- *Panels* — =VisualizationPanel= base class handles container chrome, dual store
+  subscription, priming from current state on mount, and anchor publication.
+  Panels are interchangeable, so layouts can reorder or omit them freely.
+- *Orchestrator* — =LoxVisualizer= is down to four jobs: create the WASM
+  instance and run source, accumulate events into =LoxState= and publish a
+  derived snapshot, own the stores/connectors/panels, drive the editor and
+  re-run.
+- *Language-neutral core* — =compiler-viz/= knows nothing about Lox. The
+  language-specific parts are the token category map, the event→=VizData=
+  derivation, and the core loader. Source positions are normalised to UTF-16
+  code-unit offsets at the adapter boundary.
+- *Teardown* — every panel, subscription, observer, timer, and global listener
+  has a matching cleanup path.
+
+* Language backends
+
+** Lox (clox)
+
+Real clox compiled to WASM via Emscripten, emitting JSON events on stdout:
+=lexer=, =parser=, =compiler=, =print=, =vm_step=, plus raw stdout/stderr. The
+=Makefile= copies =lox.js= / =lox.wasm= from the sibling clox checkout. Rendering
+is driven off event milestones — the first =TOKEN_EOF= and the =PROGRAM= close
+each schedule a render on the next animation frame. =window.LOX_STATE= is exposed
+for debugging.
+
+** Python (in progress)
+
+=python-visualizer/= reuses the entire =compiler-viz/= stack against CPython
+running under Pyodide. A Python-side emitter (=emitter.py=) produces tokens via
+=tokenize=, an AST, =dis= output per code object, and a step trace; =py-data.ts=
+maps that to the same =VizData=. Wired up in =content/posts/pyvis.md=. Groundwork
+is in place and the panels render, but it is not at parity with the Lox backend.
+
+* Testing
+
+Vitest, 13 test files covering the store, layout parsing/validation, mounting,
+connector geometry, AST offset resolution and navigation, viewport breakpoints,
+pane switching, slot lifecycle, token mapping, both data adapters, and the Lox
+event-accumulation state machine (the largest suite at ~1500 lines). Run with
+=make test=; type-check the test project with =make typecheck=.
+
+* Known gaps
+
+- Python backend is behind Lox; the lexer panel still takes the Lox token map by
+  default and ignores the passed-in map.
+- =lox-data.ts= keeps deprecated aliases (=LoxData=, =LoxDataStore=,
+  =VisualizerSelection=, =deriveLoxData=) for older import paths.
+- =ConnectorLayer= takes a container argument it doesn't use — the overlay is
+  always appended to =document.body=.
+- Execution trace is capped at 10,000 steps with no way to continue past it.
+- Pyodide is loaded from a CDN rather than vendored.

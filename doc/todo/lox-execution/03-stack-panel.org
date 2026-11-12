@@ -1,0 +1,165 @@
+#+title: Stack Panel
+#+date: 2026-06-18
+#+phase: 2 (after 02 — parallel with 04, 05)
+
+Create =StackPanel=: a new visualization panel that renders the Lox VM stack for
+the current playback step.  Slots are shown top-of-stack first, grouped by call
+frame with separator lines and frame labels.
+
+* Background
+
+The stack panel is read-only.  It subscribes to =ExecutionStore= and re-renders
+whenever =currentStep= changes.  It does not write to the store or participate
+in the connector/selection system yet (see 06-polish for that follow-up).
+
+Depends on: =ExecutionStore= and all types from 02.
+
+* Tasks
+
+** DONE Create =app/src/compiler-viz/panels/stack-panel.ts=
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/panels/stack-panel.ts (new)
+   :END:
+
+Scaffold the panel class.  Use the same base as the other panels (=Component=, or
+=VisualizationPanel= if the arch-refactor has landed):
+
+#+begin_src typescript
+import type { ExecutionStore, VmStep } from '@/compiler-viz/execution';
+
+export class StackPanel {
+    private store: ExecutionStore;
+    private container: HTMLElement;
+
+    constructor(container: HTMLElement, store: ExecutionStore) {
+        this.container = container;
+        this.store = store;
+    }
+
+    setUp() {
+        this.store.subscribe(state => {
+            if (state.currentStep === null) {
+                this.renderEmpty();
+            } else {
+                this.renderStep(state.steps[state.currentStep]);
+            }
+        });
+    }
+
+    private renderEmpty() { /* ... */ }
+    private renderStep(step: VmStep) { /* ... */ }
+    tearDown() { /* clear container */ }
+}
+#+end_src
+
+** DONE Implement =renderEmpty=
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/panels/stack-panel.ts
+   :END:
+
+When =currentStep= is =null=, show a placeholder message centered in the container:
+
+#+begin_src typescript
+private renderEmpty() {
+    this.container.innerHTML =
+        '<p class="stack-empty">Run a program to see the execution trace.</p>';
+}
+#+end_src
+
+** DONE Implement =renderStep= — slot list
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/panels/stack-panel.ts
+   :END:
+
+Render the stack as a =<table>= using d3.  Slots display highest index (top of
+stack) first so the most recently pushed value is at the top of the panel.
+
+Structure:
+
+#+begin_src html
+<table class="stack-table">
+  <tbody>
+    <!-- one <tr> per slot, highest index first -->
+    <tr class="stack-frame-label">
+      <td colspan="3">myFn</td>
+    </tr>
+    <tr class="stack-slot">
+      <td class="stack-idx">#5</td>
+      <td class="stack-type">num</td>
+      <td class="stack-val">3.14</td>
+    </tr>
+    <!-- frame boundary row -->
+    <tr class="stack-frame-boundary"><td colspan="3"></td></tr>
+    <tr class="stack-frame-label">
+      <td colspan="3">script</td>
+    </tr>
+    <tr class="stack-slot"> ... </tr>
+  </tbody>
+</table>
+#+end_src
+
+Algorithm:
+
+1. Build an array of display rows from =step.stack= and =step.frames=.
+   - Walk =step.frames= in reverse (highest base last = innermost frame first in
+     the reversed display).
+   - Each slot belongs to the frame whose =base= is the highest base ≤ slot index.
+2. For each frame boundary encountered while iterating slots top-to-bottom:
+   - Insert a =stack-frame-boundary= row.
+   - Insert a =stack-frame-label= row with the frame's function name.
+3. Each slot row shows: =#{index}=, type badge (=step.stack[i].t=), formatted
+   value.
+
+Use d3 =.data()= / =.join()= so re-renders diff rather than rebuild.
+
+** DONE Implement value formatting
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/panels/stack-panel.ts
+   :END:
+
+Add a pure =formatStackValue(v: StackValue): string= helper:
+
+| =t=       | Display                                       |
+|-----------+-----------------------------------------------|
+| =nil=     | =(nil)=                                       |
+| =bool=    | =true= or =false=                             |
+| =num=     | =String(v.v)= (JS default; looks good for ints and floats) |
+| =str=     | ="..."= — wrap in quotes, truncate to 20 chars |
+| =fn=      | =name/arity= e.g. =myFn/2=; nameless fn → =<fn>/2= |
+| =native=  | =<native>=                                    |
+| =class=   | =v.name=                                      |
+| =inst=    | =v.class + " {}"=                             |
+| =method=  | =v.name=                                      |
+| =upval=   | =<upval>=                                     |
+
+** DONE Mount the panel in the orchestrator
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer-demo.ts (or the refactored orchestrator)
+   :END:
+
+Add a container element for the stack panel.  The simplest approach while the
+layout refactor is still in progress: add a =<div id="lox-stack">= to the cloxvis
+post markup (=content/posts/cloxvis.md=) and mount via:
+
+#+begin_src typescript
+const stackContainer = document.querySelector<HTMLElement>('#lox-stack');
+if (stackContainer) {
+    const stackPanel = new StackPanel(stackContainer, this.executionStore);
+    stackPanel.setUp();
+}
+#+end_src
+
+If the arch-refactor layout system (arch-refactor/09–13) is already in place,
+register the panel through that mechanism instead.
+
+* Open questions
+
+- *Hide until first run*: should the stack panel be hidden with =display:none=
+  until a run completes?  Probably yes — add a CSS class toggle on the
+  container.  Simplest: check =steps.length > 0= in the store subscriber.
+- *Slot 0 convention*: The design doc says "slot #0 = first pushed".  Confirm
+  this matches how =vm.stack[0]= is used in clox (it is the reserved slot for the
+  top-level script function in clox's implementation).
+- *Frame label position*: the label row above works for display, but consider
+  whether a sticky header per frame would help for tall stacks.  Defer to
+  06-polish.

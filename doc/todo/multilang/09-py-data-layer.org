@@ -1,0 +1,278 @@
+#+title: Phase 3a — Python Data Layer
+#+date: 2026-06-18
+#+phase: 3a (parallel with 10; gate for 11)
+
+Define the JSON contract that the Python emitter script will produce, map it
+to ~VizData~, and prove the mapping with unit tests against a fixture file.
+No Pyodide, no DOM — pure data transformation.
+
+* Background
+
+The shared panels consume ~VizData~ (lexemes, AST, bytecode chunks).  A Python
+adapter needs:
+
+1. A typed ~PyRawData~ shape — the JSON the future emitter script writes.
+2. A token-category map — Python's ~tok_name~ strings → ~TokenCategory~.
+3. A ~deriveVizData(raw: PyRawData): VizData~ function — the adapter's only
+   language-specific derivation step.
+4. A fixture JSON for the sample program so the orchestrator (11) and tests
+   both have something concrete to load.
+
+* Reference
+
+See [[file:../../python/design-doc.org][doc/python/design-doc.org]] for the full CPython stage-by-stage feasibility
+analysis.  Short version: ~tokenize~ gives lexemes, ~ast.parse~ gives the tree,
+~dis.get_instructions~ gives bytecode — all with source position spans that
+can be flattened to an absolute offset using a line-start table.
+
+The worked example from the design doc uses:
+
+#+begin_src python
+x = 1 + 2
+print(x)
+#+end_src
+
+Use this as the fixture program.
+
+* Source position convention
+
+All ~start~ values in ~VizData~ are *UTF-16 code-unit* absolute offsets (i.e.
+JavaScript ~String~ indices) into the editor document.  The Python emitter must
+flatten ~(line, col)~ spans using a line-start table built once per source
+string.  For ASCII source (the fixture), UTF-8 bytes = UTF-16 code units, so
+there is no difference.
+
+Document this convention as a comment at the top of ~py-data.ts~.
+
+* Tasks
+
+** DONE Define ~PyRawData~ type
+   :PROPERTIES:
+   :files: app/src/python-visualizer/py-data.ts
+   :END:
+
+Create ~app/src/python-visualizer/py-data.ts~ and define:
+
+#+begin_src typescript
+/** Lexeme as emitted by the Python tokenize script (positions pre-flattened). */
+export interface PyRawLexeme {
+    tok_name: string;   // tokenize.tok_name value, e.g. 'NAME', 'NUMBER', 'OP'
+    text: string;
+    start: number;      // absolute UTF-16 offset
+    length: number;
+}
+
+/** Bytecode instruction as emitted by the Python dis script. */
+export interface PyRawInstruction {
+    offset: number;         // bytecode offset within the code object
+    op: string;             // inst.opname
+    arg?: number;           // inst.arg
+    constant?: string;      // str(inst.argval) when inst.argrepr is informative
+    src_start?: number;     // flattened inst.positions.col_offset (null → omit key)
+}
+
+/** Top-level JSON shape the Python emitter writes. */
+export interface PyRawData {
+    source: string;
+    lexemes: PyRawLexeme[];
+    ast: AstNode;           // already in shared AstNode shape (emitter builds it)
+    chunks: Record<string, PyRawInstruction[]>;  // code object name → instructions
+    console?: Array<{ type: 'print' | 'error'; text: string; src_offset?: number }>;
+}
+#+end_src
+
+Import ~AstNode~ from ~@/compiler-viz/ast~.
+
+** DONE Define ~PYTHON_TOKEN_CATEGORY_MAP~
+   :PROPERTIES:
+   :files: app/src/python-visualizer/py-data.ts
+   :END:
+
+Map Python ~tok_name~ strings to the shared ~TokenCategory~ enum.  Python
+keywords are ~NAME~ tokens; the emitter distinguishes them by checking
+~keyword.iskeyword(text)~ and emitting ~tok_name: 'KEYWORD'~ (a synthetic
+name not in ~tokenize.tok_name~) for the category override.
+
+#+begin_src typescript
+import { TokenCategory } from '@/lox-visualizer/state/token';
+import type { TokenCategoryMap } from '@/lox-visualizer/token-map';
+
+export const PYTHON_TOKEN_CATEGORY_MAP: TokenCategoryMap = {
+    NAME:       { category: TokenCategory.IDENTIFIER },
+    KEYWORD:    { category: TokenCategory.KEYWORD },   // synthetic — emitter sets this
+    NUMBER:     { category: TokenCategory.LITERAL },
+    STRING:     { category: TokenCategory.LITERAL },
+    FSTRING:    { category: TokenCategory.LITERAL },   // 3.12+
+    OP:         { category: TokenCategory.OPERATOR },
+    COMMENT:    { category: null },
+    NEWLINE:    { category: null },
+    NL:         { category: null },
+    INDENT:     { category: null },
+    DEDENT:     { category: null },
+    ENCODING:   { category: null },
+    ENDMARKER:  { category: null },
+    ERRORTOKEN: { category: null },
+};
+#+end_src
+
+Punctuation overrides (~(~, ~)~, ~[~, ~]~, ~{~, ~}~) will be handled by the
+emitter emitting ~tok_name: 'PAREN'~ / ~'BRACE'~ for those ~OP~ tokens —
+the same synthetic-name trick as ~KEYWORD~.  Add those entries:
+
+#+begin_src typescript
+    PAREN: { category: TokenCategory.PAREN },
+    BRACE: { category: TokenCategory.BRACE },
+#+end_src
+
+** DONE Implement ~deriveVizData~
+   :PROPERTIES:
+   :files: app/src/python-visualizer/py-data.ts
+   :END:
+
+#+begin_src typescript
+export function deriveVizData(raw: PyRawData): VizData {
+    const lexemes: Lexeme[] = raw.lexemes.map((t) => ({
+        start: t.start,
+        length: t.length,
+        text: t.text,
+        category: PYTHON_TOKEN_CATEGORY_MAP[t.tok_name]?.category ?? null,
+    }));
+
+    const chunks = new Map<string, Instruction[]>();
+    for (const [name, instrs] of Object.entries(raw.chunks)) {
+        chunks.set(name, instrs.map((i) => ({
+            chunk: name,
+            offset: i.offset,
+            op: i.op,
+            line: 0,         // Python emitter may add later; panels tolerate 0
+            srcOffset: i.src_start ?? 0,
+            arg: i.arg,
+            constant: i.constant,
+        })));
+    }
+
+    return { lexemes, ast: raw.ast, chunks };
+}
+#+end_src
+
+Also export a thin ~publishConsoleMessages~ re-export or just import it from
+~@/lox-visualizer/lox-data~ in the orchestrator directly.
+
+** DONE Write fixture JSON
+   :PROPERTIES:
+   :files: app/src/python-visualizer/fixtures/sample.json
+   :END:
+
+Create the pre-computed fixture for:
+
+#+begin_src python
+x = 1 + 2
+print(x)
+#+end_src
+
+Source string is ~"x = 1 + 2\nprint(x)"~ (19 chars).  Line 1 starts at
+offset 0; line 2 starts at offset 11 (after the ~\n~).
+
+Offsets:
+- ~x~ (assign target): 0, length 1
+- ~=~: 2, length 1
+- ~1~: 4, length 1
+- ~+~: 6, length 1
+- ~2~: 8, length 1
+- ~print~: 11, length 5
+- ~(~: 16, length 1
+- ~x~ (arg): 17, length 1
+- ~)~: 18, length 1
+
+AST (build the ~AstNode~ tree by hand; ~start~ is the node's ~col_offset~
+flattened to absolute):
+- ~Module~ at start 0
+  - ~Assign~ at start 0
+    - ~Name 'x'~ (Store) at start 0 (childType: ~"Target"~)
+    - ~BinOp~ at start 4 (childType: ~"Value"~)
+      - ~Constant 1~ at start 4 (childType: ~"Operand"~)
+      - ~Constant 2~ at start 8 (childType: ~"Operand"~)
+  - ~Expr~ at start 11
+    - ~Call~ at start 11 (childType: ~"Expression"~)
+      - ~Name 'print'~ at start 11 (childType: ~"Callee"~)
+      - ~Name 'x'~ at start 17 (childType: ~"Argument"~)
+
+Bytecode chunk ~"<module>"~ (constant-folded; ~1 + 2~ → ~3~):
+
+| offset | op              | arg | constant | src_start |
+|--------+-----------------+-----+----------+-----------|
+|      0 | LOAD_CONST      |   3 | "3"      |         4 |
+|      2 | STORE_NAME      |     | "x"      |         0 |
+|      4 | LOAD_NAME       |     | "print"  |        11 |
+|      8 | LOAD_NAME       |     | "x"      |        17 |
+|     10 | CALL            |   1 |          |        11 |
+|     14 | POP_TOP         |     |          |        11 |
+|     16 | LOAD_CONST      |     | "None"   |           |
+|     18 | RETURN_VALUE    |     |          |           |
+
+Omit ~src_start~ for instructions where ~positions~ is ~None~.
+
+** DONE Write unit tests
+   :PROPERTIES:
+   :files: app/src/python-visualizer/py-data.test.ts
+   :END:
+
+Test ~deriveVizData~ with the fixture JSON:
+
+#+begin_src typescript
+import sampleFixture from '@/python-visualizer/fixtures/sample.json';
+import { deriveVizData, PYTHON_TOKEN_CATEGORY_MAP } from '@/python-visualizer/py-data';
+import { TokenCategory } from '@/lox-visualizer/state/token';
+
+describe('PYTHON_TOKEN_CATEGORY_MAP', () => {
+    it('maps NAME → IDENTIFIER', () => {
+        expect(PYTHON_TOKEN_CATEGORY_MAP['NAME'].category).toBe(TokenCategory.IDENTIFIER);
+    });
+    it('maps KEYWORD → KEYWORD', () => {
+        expect(PYTHON_TOKEN_CATEGORY_MAP['KEYWORD'].category).toBe(TokenCategory.KEYWORD);
+    });
+    it('maps COMMENT → null', () => {
+        expect(PYTHON_TOKEN_CATEGORY_MAP['COMMENT'].category).toBeNull();
+    });
+});
+
+describe('deriveVizData()', () => {
+    const data = deriveVizData(sampleFixture);
+
+    it('produces the right number of lexemes', () => { /* count from fixture */ });
+    it('gives x its start offset 0', () => {
+        const x = data.lexemes.find((l) => l.text === 'x' && l.start === 0);
+        expect(x).toBeDefined();
+        expect(x!.category).toBe(TokenCategory.IDENTIFIER);
+    });
+    it('gives + the OPERATOR category', () => {
+        const plus = data.lexemes.find((l) => l.text === '+');
+        expect(plus!.category).toBe(TokenCategory.OPERATOR);
+    });
+    it('produces a <module> chunk', () => {
+        expect(data.chunks.has('<module>')).toBe(true);
+    });
+    it('maps LOAD_CONST to srcOffset 4 for the constant-folded expression', () => {
+        const instr = data.chunks.get('<module>')!.find((i) => i.op === 'LOAD_CONST' && i.srcOffset === 4);
+        expect(instr).toBeDefined();
+    });
+    it('ast root type is Module', () => {
+        expect(data.ast.type).toBe('Module');
+    });
+});
+#+end_src
+
+Enable JSON import in ~tsconfig.json~ if not already set (~resolveJsonModule: true~
+in ~compilerOptions~).
+
+* Acceptance
+
+- ~vitest run~ green.
+- ~deriveVizData(sampleFixture)~ returns a ~VizData~ with correct lexeme count,
+  ~<module>~ chunk present, ~ast.type === 'Module'~.
+- No Pyodide or DOM imported.
+
+* Notes
+
+Parallel with [[file:10-py-build-post.org][10]].  Gate for [[file:11-py-orchestrator.org][11]] (orchestrator imports
+~deriveVizData~ and ~PYTHON_TOKEN_CATEGORY_MAP~ from this file).

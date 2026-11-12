@@ -1,0 +1,148 @@
+#+title: Orchestrator Layout Integration
+#+date: 2026-06-18
+#+phase: 4c (after 09, 10, 11, 12 — sequential gate)
+
+Rewire ~lox-visualizer.ts~ to mount layout from the page, construct all panes
+through the registry, and use ~MountResult.root~ as the connector overlay parent
+instead of ~document.body~.
+
+* Background
+
+Current constructor (~lox-visualizer.ts~ ~60–82~):
+
+- ~ConnectorLayer(document.body)~ — overlay covers the whole page.
+- ~querySelector('#lox-lexer')~ etc. — requires post-planted divs.
+- Hard-coded three ~VisualizationPanel~ instances.
+
+After integration:
+
+#+begin_src typescript
+const anchor = findCodeAnchor();
+if (!anchor) return;
+
+const { root, containers, sampleCode } = mountVisualizer(anchor.pre, layout);
+const ctx: PanelContext = { dataStore, selection, connectors, root, onRun, getConsoleMessages };
+declareConnectors(connectors, layout, colors);
+
+const children: Component[] = [];
+for (const kind of kindsInLayout(layout)) {
+    children.push(createFromRegistry(kind, containers.get(kind)!, ctx));
+}
+super(children, false);
+#+end_src
+
+Module entry (~221–222~):
+
+#+begin_src typescript
+const app = LoxVisualizer.fromPage();  // or mount({ layout: DEFAULT_LAYOUT })
+void app.setUp();
+#+end_src
+
+* Tasks
+
+** DONE Add ~LoxVisualizer.fromPage(options?)~ static factory
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+- ~findCodeAnchor~ → ~mountVisualizer~ → construct instance with ~MountResult~.
+- Pass ~sampleCode~ into ~EditorSlot~ via registry.
+- If no anchor found, log and skip init (or throw in dev).
+
+** DONE Refactor constructor to registry-driven panel wiring
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+Remove direct ~LexerPanel~ / ~AstPanel~ / ~BytecodePanel~ imports from
+constructor (registry owns them).  Keep ~this.panels~ as
+~VisualizationPanel[]~ filtered from ~children~ for ~refreshAnchor~.
+
+~ConnectorLayer~ parent = ~mountResult.root~, not ~document.body~.
+
+** DONE Move ~setUp~ editor/console code to slots
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+Delete:
+
+- CodeMirror / Run button creation block (~137–158~),
+- ~preEl?.replaceWith(editorContainer)~ (mount already replaced ~<pre>~),
+- ~displayConsole~ method.
+
+Replace with:
+
+- ~this.editor.getText()~ in ~rerun~ / initial run,
+- ~this.consoleSlot.render()~ where ~displayConsole~ was called,
+- ~this.loxState.set('text', sampleCode)~ using mount-provided text before first
+  ~runSource~.
+
+** DONE Order: mount → construct children → ~super.setUp()~ → WASM run
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+Preserve today's ordering intent:
+
+1. WASM + event handlers registered.
+2. ~super.setUp()~ — panels subscribe + prime.
+3. ~runSource(sampleCode)~ + console render.
+
+Mount happens in ~fromPage~ *before* ~setUp~ (DOM must exist before panels
+subscribe).  Do not call ~mount~ inside ~async setUp~ after WASM load — the DOM
+should be stable immediately.
+
+** DONE Layout-aware connector topology
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+Call ~declareConnectors(connectors, layout, colors)~ from 09 instead of
+unconditional ~addLine~ calls.
+
+** DONE Expose layout override at module entry
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+#+begin_src typescript
+import { DEFAULT_LAYOUT } from './layout';
+
+const app = LoxVisualizer.fromPage({ layout: DEFAULT_LAYOUT });
+void app.setUp();
+#+end_src
+
+Document how a different post changes ~DEFAULT_LAYOUT~ or passes a custom layout
+to ~fromPage~.
+
+** DONE Integration smoke checklist (automated where possible)
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+- ~npx tsc --noEmit~ — no new errors.
+- ~npm test~ — mount tests + existing suite pass.
+- ~npm run build~ — bundle succeeds.
+- Grep: no remaining ~querySelector('#lox-lexer')~ in orchestrator (panels use
+  injected ~container~ only).
+
+* Dependencies
+
+Requires 09 (types/registry), 10 (mount), 11 (slots), 12 (CSS — land together
+or immediately before manual browser check).
+
+* Acceptance
+
+- Post with *only* ~<script>~ + ~ ```nil ``` ~ block renders full visualizer
+  (after 14 cleans legacy divs).
+- Connector overlay scoped to ~.lox-visualizer~, not full page.
+- Configurable layout: omitting ~'console'~ from layout skips console pane +
+  shell.
+- All original interactions still work (manual browser pass).
+
+* Open questions
+
+- *~documentClickHandler~ scope:* still on ~document~ (click anywhere outside
+  selectable clears).  No change needed.
+- *Optional ~data-layout~ on script tag:* defer unless requested during this task.

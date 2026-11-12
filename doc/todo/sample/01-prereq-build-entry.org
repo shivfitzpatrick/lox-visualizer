@@ -1,0 +1,72 @@
+#+title: Prerequisite — Restore the Broken Vite Entry
+#+date: 2026-08-11
+#+phase: 0 (blocks everything; also blocks any other lox-visualizer work)
+#+TODO: TODO NEXT IN-PROGRESS WAITING | DONE CANCELLED
+
+The build is broken at HEAD and must be fixed before the sample-picker
+feature (or anything else) can ship.
+
+* Background
+
+~vite.config.js:31~ points the Lox entry at
+~app/src/lox-visualizer/main.ts~ — a file that exists neither on disk
+nor in ~git ls-files~.  ~vite build~ fails immediately.
+
+The history: ~doc/todo/error-handling/01-run-lifecycle.org~ (outcome
+dated 2026-08-03) records extracting the bootstrap out of
+~lox-visualizer.ts~ into ~main.ts~ as *landed*, together with
+~runAndPublish~ / ~reportRunFailure~.  But in this working tree:
+
+- ~lox-visualizer.ts~ still self-boots at module tail (lines 421–422:
+  ~const app = LoxVisualizer.fromPage(); if (app) void app.setUp();~)
+- ~grep runAndPublish~ finds nothing
+- ~main.ts~ is absent
+- yet the committed ~vite.config.js~ references ~main.ts~ (with
+  comments explaining the extraction), and ~tsconfig.test.json~ sits
+  untracked in the tree
+
+So the stream-01 landing was partial: config committed, source changes
+lost or never committed.  Worth investigating whether that work exists
+on another machine / stash / branch before recreating anything.
+
+* Tasks
+
+** TODO Look for the lost stream-01 work
+   :PROPERTIES:
+   :files:    —
+   :END:
+
+~git stash list~, other branches, other checkouts.  If found, land it
+properly and this doc's remaining tasks collapse to "verify".
+
+** TODO Recreate ~main.ts~ (bootstrap only)
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/main.ts, app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+If the work is gone, recreate *only the bootstrap extraction* here —
+do NOT re-do the ~runAndPublish~ error-handling work in this stream;
+that stays owned by ~doc/todo/error-handling/~.
+
+- ~main.ts~: import ~LoxVisualizer~, call ~fromPage()~, ~setUp()~ with
+  a ~.catch~ that logs (per the stream-01 doc).
+- Delete the self-boot tail from ~lox-visualizer.ts~ so it is
+  side-effect free (this is what makes ~EditorSlot~/orchestrator
+  changes testable without mounting a visualizer on import).
+- The Vite input *key* ~'lox-visualizer/lox-visualizer'~ keeps the
+  built filename and served URL unchanged; no post edits needed.
+
+** TODO Verify the build
+   :PROPERTIES:
+   :files:    —
+   :END:
+
+~make~ (or ~npx vite build~): confirm ~app/dist/lox-visualizer/lox-visualizer.js~
+is emitted and ~/visualizers~ still works in a browser.  Note the
+stream-01 warning: a running ~make dev~ (~vite build --watch~) does not
+reload ~vite.config.js~ — restart it.
+
+* Done when
+
+~vite build~ succeeds from a clean checkout and the visualizer page
+loads and runs.

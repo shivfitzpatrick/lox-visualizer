@@ -1,0 +1,130 @@
+#+title: Bytecode Panel
+#+date: 2026-06-18
+#+phase: 2b (after 04 — parallel with 05, 06)
+
+Wrap ~drawBytecode~ in a ~BytecodePanel extends VisualizationPanel~.  Clicking
+an instruction writes its ~src_offset~ to the store as ~selectedStart~; on
+selection change the panel highlights the matching row and publishes the ~'bc'~
+anchor so the ~ast↔bc~ connector can be drawn.
+
+* Background
+
+~drawBytecode~ (~app/src/lox-visualizer/bytecode.ts~) is already a stateless
+renderer taking an ~onClick(instr, el)~ callback.  The demo wires it via
+~onInstructionClick~ (demo 197–219), which today does four things:
+
+1. clears previous bytecode highlight,
+2. marks the clicked row ~bc-selected~,
+3. finds + highlights the matching lexer span and AST ~<g>~ by
+   ~src_offset~/~data-start~ (adds ~bc-highlight~ class),
+4. calls ~this.focusByStart?.(instr.src_offset)~ to drive the AST.
+
+In the new model the panel only owns concern (1)+(2) and the store write; the
+lexer/AST highlights become *reactions* in those panels, and the connector is
+drawn by the layer from declared anchors.
+
+Container: ~#lox-compiler~ (note: the post div id is ~lox-compiler~, not
+~lox-bytecode~ — see ~content/posts/cloxvis.md~).  Anchor id: ~'bc'~.
+
+* Tasks
+
+** DONE Create ~panels/bytecode-panel.ts~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/panels/bytecode-panel.ts (new)
+   :END:
+
+#+begin_src typescript
+export class BytecodePanel extends VisualizationPanel {
+    readonly panelId = 'bc';
+    onDataChange(data: LoxData) { /* drawBytecode(select(container), data.chunks, onClick) */ }
+    onSelectionChange(state: VisualizerSelection) { /* highlight row + anchor */ }
+    private selectedOffset: number | null = null;
+}
+#+end_src
+
+** DONE Render in ~onDataChange~ and write store on click
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/panels/bytecode-panel.ts
+   :END:
+
+Call ~drawBytecode(select(this.container), data.chunks, onClick)~.  The click
+handler writes to the store instead of orchestrating panels:
+
+#+begin_src typescript
+const onClick = (instr, _el) => {
+    if (!instr) return;
+    this.selectionStore.set({ selectedStart: instr.src_offset, selectedAstNode: null });
+};
+#+end_src
+
+Writing ~selectedAstNode: null~ lets the AST panel resolve + write back the node
+(so the lexer can highlight the subtree) — same protocol as the lexer panel.
+
+Note rows already carry ~data-src-offset~ (bytecode.ts line 37); use it to find
+rows in ~onSelectionChange~.
+
+** DONE Implement ~onSelectionChange~ (row highlight + anchor)
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/panels/bytecode-panel.ts
+   :END:
+
+Port the bytecode-highlight half of ~clearBcHighlight~ + ~onInstructionClick~
+(demo 187–219), but driven by store state:
+
+1. Clear previous row classes (~bc-selected~, ~bc-highlight~) — port
+   ~clearBcHighlight~ (demo 187–195) minus the ~clearConnector('bc-ast')~ call
+   (the layer handles that via the null anchor).
+2. If ~state.selectedStart === null~: clear, ~this.setAnchor(null)~,
+   ~this.selectedOffset = null~, return.
+3. Find the row whose ~src_offset~ matches ~selectedStart~:
+   ~this.container.querySelector('tr[data-src-offset="N"]')~.
+   - If none (the selection came from a token with no emitted instruction),
+     clear + ~this.setAnchor(null)~ + return.  (Not every source offset has a
+     bytecode row.)
+   - If found, add ~bc-selected~, record ~this.selectedOffset~, and
+     ~this.setAnchor(row.getBoundingClientRect())~ to feed the ~ast↔bc~ line.
+
+This makes the bytecode row light up when the user clicks an AST node *or* a
+lexer token whose offset matches an instruction — a capability beyond today's
+one-directional bc→ast flow, and a good validation that the store model works
+symmetrically.
+
+** DONE Reconcile the old ~bc-highlight~ cross-marks
+   :PROPERTIES:
+   :files:    (design decision; coordination with 05, 06)
+   :END:
+
+Today ~onInstructionClick~ also added a ~bc-highlight~ class to the matching
+lexer span and AST ~<g>~ (demo 205–215).  In the new model those visual
+treatments belong to the lexer/AST panels' own ~onSelectionChange~:
+
+- The lexer panel already styles the selected span(s) (05).
+- The AST panel already highlights the focused node via its ~rect~ stroke
+  (ast.ts ~setHighlight~).
+
+Decide whether the distinct ~bc-highlight~ styling is still wanted on top of the
+normal selection styling.  Simplest: drop ~bc-highlight~ and rely on the unified
+selection styling each panel applies regardless of who initiated the selection.
+If the distinct look is desired, that's a follow-up styling task, not a
+cross-panel responsibility.
+
+** DONE Tear-down
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/panels/bytecode-panel.ts
+   :END:
+
+Rows are recreated each ~onDataChange~ (~drawBytecode~ does
+~target.selectAll('details').remove()~, bytecode.ts line 21), so listeners die
+with their elements.  On ~tearDown~, clear row classes and the anchor; reset
+~selectedOffset~.
+
+* Open questions
+
+- *Offset with no instruction*: handled by clearing the anchor (line stays
+  hidden).  Confirm this matches desired UX — clicking such a token still
+  highlights the lexer/AST but draws no bc line.
+- *Chunk collapse state*: ~drawBytecode~ opens only the first chunk
+  (~<details open>~).  If the selected instruction is inside a collapsed chunk,
+  the row rect may be 0-sized/hidden, so the anchor/line won't show.  Should
+  ~onSelectionChange~ auto-open the containing ~<details>~?  Likely yes — add
+  ~row.closest('details')?.setAttribute('open','')~ before measuring.

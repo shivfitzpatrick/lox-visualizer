@@ -1,0 +1,118 @@
+#+title: LoxData Snapshot Type
+#+date: 2026-06-18
+#+phase: 1 (foundation — parallel with 01, 02)
+
+Define ~LoxData~: the immutable, derived snapshot the orchestrator publishes to
+panels through a *data store* (~Store<{ data: LoxData | null }>~).  This draws
+the boundary the architecture calls for — the orchestrator owns ~LoxState~ and
+*derives* data; panels receive plain data and never reach into ~LoxState~.
+
+Distribution uses the same ~Store~ primitive as selection (see
+~00-overview.org~ → "State management" and "Two stores"), *not* a separate
+mechanism and *not* a manual per-panel fan-out.  The raw WASM event stream stays
+on ~d3.dispatch~ in ~lox-core.ts~; this snapshot is observable *state*, so it
+lives in a store.
+
+* Background
+
+Today ~render()~ in the demo calls ~loxState.lex()~, ~loxState.parse()~,
+~loxState.compile()~ and passes the results directly to the renderers
+(~app/src/lox-visualizer/lox-visualizer-demo.ts~ lines ~270–286~).  Panels in
+the new design must not depend on ~LoxState~; they consume a snapshot.
+
+~LoxState~ stays in ~state/state.ts~ essentially unchanged
+(~doc/lox-visualizer-architecture.org~ → "What does not need to change").  This
+task only extracts the *shape* of derived output and a builder.
+
+* Tasks
+
+** DONE Define the ~LoxData~ type
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-data.ts (new)
+   :END:
+
+Capture exactly what the three derivations produce today:
+
+#+begin_src typescript
+import type { Lexeme, ConsoleMessage } from '@/lox-visualizer/state/state';
+import type { AstNode } from '@/lox-visualizer/ast';
+import type { CompilerEvent } from '@/lox-visualizer/events';
+
+export interface LoxData {
+    lexemes: Lexeme[];
+    ast: AstNode;
+    chunks: Map<string, CompilerEvent[]>;
+}
+#+end_src
+
+Console output uses a separate ~ConsoleStore~ (~Store<{ messages: ConsoleMessage[] }>~)
+because print lines arrive mid-run; ~LoxData~ is published once per
+lex/parse/compile cycle.  See ~publishConsoleMessages~ in ~lox-data.ts~.
+
+Re-export ~VisualizerSelection~ here too (canonical home; ~01-store.org~ imports
+from here).
+
+** DONE Add a builder from ~LoxState~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-data.ts
+   :END:
+
+#+begin_src typescript
+export function deriveLoxData(state: LoxState): LoxData {
+    const lexemes = state.lex();
+    const ast = state.parse();
+    const chunks = state.compile();
+    return { lexemes, ast, chunks };
+}
+#+end_src
+
+~lex()~ must run before ~parse()~ (~parse()~ reads the ~lexemes~ prop ~lex()~ sets).
+
+** DONE Define the data store type + creation (consumed by 04, 08)
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-data.ts
+   :END:
+
+#+begin_src typescript
+export type LoxDataStore = Store<{ data: LoxData | null }>;
+export type ConsoleStore = Store<{ messages: ConsoleMessage[] }>;
+#+end_src
+
+The store *instance* is created by the orchestrator (08), initialized to
+~{ data: null }~.  The flow:
+
+- The orchestrator accumulates raw events via ~LoxState~ exactly as today (the
+  ~lox.events.on('lexer'|'parser'|'compiler', …)~ handlers; ~LoxState~ internals
+  unchanged).
+- When a run *finishes* aggregating (the existing completion signals — lexer
+  ~TOKEN_EOF~ and parser ~PROGRAM~ close), it derives once and publishes in a
+  single shot:
+  #+begin_src typescript
+  this.dataStore.set({ data: deriveLoxData(this.loxState) });
+  #+end_src
+- Panels subscribe to ~dataStore~ in their base ~setUp~ and run ~onDataChange~ on
+  change (and prime from ~get()~ — see 04).  No incremental store writes; no
+  ~for (panel of panels) onDataChange(...)~ loop.
+
+This keeps accumulation (an implementation detail of ~LoxState~) separate from
+distribution (the data store), and uses one consistent state primitive for both
+data and selection.
+
+** TODO (Optional) Tighten ~LoxState.parse~'s return type
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/state/state.ts
+   :END:
+
+~parse()~ is typed to return ~AstNode~ but the ~ast~ prop is
+~AstNode | Record<string, never>~.  ~deriveLoxData~ wants a plain ~AstNode~.
+The current ~parse()~ always builds a real root node, so this is safe; if the
+type checker complains, narrow at the ~deriveLoxData~ boundary rather than
+loosening ~LoxData.ast~.  Do *not* change ~LoxState~ internals beyond types —
+the event-accumulation/derivation logic stays as-is.
+
+* Open questions (resolved)
+
+- *Console vs LoxData*: resolved — ~ConsoleStore~ for mid-run prints;
+  ~LoxData~ for lex/parse/compile snapshot only.
+- *VisualizerSelection home*: resolved — lives in ~lox-data.ts~; ~01-store.org~
+  imports from there.

@@ -1,0 +1,70 @@
+#+title: Post Markup Cleanup
+#+date: 2026-06-18
+#+phase: 4d (after 13 — small, sequential)
+
+Remove hand-planted panel divs from the cloxvis post.  After 13, the app mounts
+everything from the sample code block alone.
+
+* Target post shape
+
+#+begin_example
+<script src="/app/lox-visualizer/lox-visualizer.js" type="module"></script>
+
+```nil
+fun loopPrinter(addMe, minusMe) {
+  …
+}
+```
+#+end_example
+
+No ~<div id="lox-lexer">~, no ~.lox-editor-lexer-row~ wrapper, no unused
+~#lox-stack~ / ~#lox-output~ placeholders.
+
+* Tasks
+
+** DONE Simplify ~content/posts/cloxvis.md~
+   :PROPERTIES:
+   :files:    content/posts/cloxvis.md
+   :END:
+
+Remove lines ~29–51~ panel markup; keep prose + script tag + fenced ~nil~ block
+only.  The script tag stays *above* the code block (current order) so the module
+loads before Hugo renders the pre — same as today.
+
+** DONE Sync ~content-org/posts.org~
+   :PROPERTIES:
+   :files:    content-org/posts.org
+   :END:
+
+Mirror the cloxvis export block (~#+BEGIN_EXPORT html~ section): drop panel divs,
+keep script + code block inside the export wrapper if the org source still wraps
+the editor row that way.
+
+** DONE Verify rendered HTML in browser
+   :PROPERTIES:
+   :files:    (manual)
+   :END:
+
+- Editor + lexer side by side (row 1).
+- AST, bytecode, console each on their own row.
+- Console hidden when empty (~:not(:empty)~ rule).
+- No duplicate empty divs in devtools.
+
+** DONE Update architecture docs (optional cross-link)
+   :PROPERTIES:
+   :files:    doc/lox-visualizer-architecture.org
+   :END:
+
+Add a short "Layout" subsection under Direction noting programmatic mount +
+~VisualizerLayout~ config.  Keep brief — the task specs live here in
+~doc/todo/arch-refactor/09–14~.
+
+* Dependencies
+
+- 13 must be merged and verified — stripping post divs before orchestrator mount
+  lands breaks the current production page.
+
+* Acceptance
+
+- cloxvis post source contains zero ~id="lox-*"~ panel mount points.
+- Site build includes the post; visualizer initializes from ~.language-nil~ only.

@@ -1,0 +1,265 @@
+#+TITLE: Protocol Analysis, Parser Fixes, and Visualization Roadmap
+#+DATE: 2026-03-14
+
+* Big Picture
+
+The session had two distinct threads. The first was concrete: reading
+the clox C source to understand the parser event protocol, identifying
+bugs in the JavaScript protocol adapter, and correcting them (with
+tests to verify). The second was broader: mapping out the full arc of
+what the visualizer is trying to do across all phases of compilation
+and execution, and thinking through what that implies for the protocol
+and data model going forward.
+
+* Reading the C Protocol
+
+Explored the clox compiler source (~compiler.c~) in detail to
+understand what the parser events actually mean.
+
+** The event shape
+
+Two distinct patterns are used for different parts of the grammar:
+
+*Statements* use open/close pairs — a simple recursive tree walk:
+#+begin_src json
+{"msg_type": "parser", "node_type": "Function", "action": "open", "start": 0}
+{"msg_type": "parser", "node_type": "Function", "action": "attr", "value": "name", "start": 4}
+{"msg_type": "parser", "node_type": "Function", "action": "pushattr", "value": "params", "start": 16}
+{"msg_type": "parser", "node_type": "Function", "action": "close", "start": 0}
+#+end_src
+
+*Expressions* use a postfix stack — events arrive in post-order, with
+~open_expression~/~close_expression~ brackets wrapping sub-expressions:
+#+begin_src json
+{"action": "open_expression", "start": 0}
+{"node_type": "Variable", "action": "expression_node", "start": 0, "children": 0}
+{"action": "open_expression", "start": 2}
+{"node_type": "Number", "action": "expression_node", "start": 2, "children": 0}
+{"action": "close_expression", "start": 3}
+{"node_type": "Call", "action": "expression_node", "start": 5, "children": 3}
+{"action": "close_expression", "start": 6}
+#+end_src
+
+** Why expressions are postfix
+
+The clox compiler is a single-pass Pratt parser that emits bytecode
+directly — it never builds an AST internally. With a Pratt parser, you
+don't know you're inside a binary expression until after you've
+already parsed the left operand.  Emitting in prefix or in-order order
+would require knowing the full subtree before emitting anything, which
+means building an AST in C first. The postfix design is the natural
+output of this architecture. This is not a limitation to fix — it's
+the right call given the constraints.
+
+** The ~start~ coordinate system
+
+Events use ~parser.previous.start - getScannerStart()~ for their
+~start~ field. ~getScannerStart()~ returns the pointer to the first
+byte of the source buffer, set once when ~initScanner()~ is
+called. ~parser.previous.start~ is a pointer into that same
+buffer. The subtraction gives a byte offset from the beginning of the
+source.
+
+Crucially: the ~Scanner~ and ~Parser~ are global variables that are
+never reinitialized during nested function compilation. The ~Compiler~
+struct chains (via ~enclosing~ pointers) handle bytecode chunk
+nesting, but the scanner continues scanning the same source
+uninterrupted. So ~start~ values inside nested function bodies are
+correct byte offsets into the original source — the chunk nesting
+problem (where bytecode offsets reset to 0 per function) does not
+affect parser event positions.
+
+* Protocol Design Observations
+
+Several things to be aware of for future work:
+
+- *~children~ on Call includes the callee.* ~children: 3~ for ~f(1, 2)~
+  means callee + 2 arguments. The JS side has to know this by convention.
+
+- *~start~ is overloaded.* For Variable/Number it's the token
+  start. For Binary it's the operator token. For Call it's the closing
+  paren. The meaning shifts per node type, which required a
+  Call-specific guard when setting ~attrs.name~.
+
+- *~child_type~ is statement-only.* Child types like Callee and
+  Argument are assigned by the JS adapter by convention for
+  expressions, but emitted explicitly as events for statements. Two
+  mechanisms doing the same job.
+
+- *The mixed-mode problem.* The ~open_expression~/~close_expression~ brackets
+  exist for function call arguments but not for binary operands. This means the
+  nodes stack in ~parseExpression~ can contain both raw events and pre-built
+  AstNodes simultaneously, requiring the adapter to detect and handle both.
+
+* Bugs Found and Fixed in the Protocol Adapter
+
+** Bug 1: missing ~else~ in ~parseExpression~
+
+#+begin_src javascript
+// Before — both branches execute when action === OPEN_EXPRESSION:
+if (iterResult.value.action === PARSER_ACTIONS.OPEN_EXPRESSION) {
+    nodes.push(parseExpression({ lexemeMap, iterator, childType }));
+}
+nodes.push(iterResult.value);  // also pushes the open_expression event itself
+
+// After:
+if (iterResult.value.action === PARSER_ACTIONS.OPEN_EXPRESSION) {
+    nodes.push(parseExpression({ lexemeMap, iterator, childType: null }));
+} else {
+    nodes.push(iterResult.value);
+}
+#+end_src
+
+Also changed ~childType~ → ~childType: null~ on the recursive call:
+the child type for an argument sub-expression can't be known until the
+Call event is seen later.
+
+** Bug 2: ~parseExpressionNode~ couldn't handle pre-built AstNodes
+
+After fixing bug 1, the nodes stack contains a mix of raw parser events and
+finished AstNodes (returned from recursive ~parseExpression~ calls). AstNodes
+have ~children~ as an array; raw events have ~children~ as a number. Added a
+check at the top of ~parseExpressionNode~:
+
+#+begin_src javascript
+if (Array.isArray(item.children)) {
+    return { ...item, childType };
+}
+#+end_src
+
+** Bug 3: Call children had wrong types and wrong order
+
+Call children are popped LIFO from the stack: last argument first,
+callee last. Added CALLEE/ARGUMENT assignment using the reversed
+index, then reversed the children array to restore source order:
+
+#+begin_src javascript
+if (rootEvent.node_type === NODE_TYPE.CALL) {
+    childChildType = (i === rootEvent.children - 1) ? CHILD_TYPE.CALLEE : CHILD_TYPE.ARGUMENT;
+}
+// ... after the loop:
+if (rootEvent.node_type === NODE_TYPE.CALL) {
+    rootNode.children.reverse();
+}
+#+end_src
+
+** Bug 4: Call ~attrs.name~ was set to ~)~
+
+The Call event's ~start~ points to the closing paren, not a meaningful
+token.  Guard added: ~if (rootEvent.node_type !== NODE_TYPE.CALL)~
+before the ~attrs.name~ lookup.
+
+** Test fixture corrections
+
+The ~fn call~ test fixture incorrectly included ~Program~ open/close
+events.  In real usage these are filtered out in
+~lox-visualizer-demo.ts~ before reaching ~parserEvents~ — they never
+reach ~parseNode~. Removing them from the fixture also revealed that
+the last argument's ~childType~ should be ~CHILD_TYPE.ARGUMENT~, not
+~null~.
+
+* TypeScript Notes from This Session
+
+** ~parseNode~ parameter types
+
+Typed the destructured parameters using the separate annotation block:
+#+begin_src typescript
+function parseNode({
+  node,
+  lexemeMap,
+  iterator,
+}: {
+  node: AstNode,
+  lexemeMap: Record<number, Lexeme>,
+  iterator: Iterator<ParserEvent>
+})
+#+end_src
+
+Common mistake: accidentally writing type fragments in the
+destructuring list itself (e.g., ~lexemeMap, Lexeme>~) rather than in
+the annotation block.
+
+** PUSHATTR narrowing
+
+TypeScript does not narrow through index access on mutable
+objects. Even after checking ~node.attrs[key] == null~ and
+~!Array.isArray(node.attrs[key])~, it re-evaluates the type of
+~node.attrs[key]~ fresh on the next line. Fix: assign to a local
+variable first so narrowing can track it.
+
+** ~AstNode.attrs~ typing
+
+Changed from ~{ name?: string; params?: string[] }~ to an open index
+signature:
+#+begin_src typescript
+attrs: { [key: string]: string | string[] | undefined };
+#+end_src
+
+Rationale: ~attrs~ is a dynamic bag driven by whatever the C compiler emits.
+Locking it to specific keys creates churn every time a new node type appears.
+The visualizer uses named properties if present and fails gracefully if not.
+
+* Visualization Roadmap Discussion
+
+** The phases
+
+The goal is to visualize each phase of compilation and execution:
+
+1. *Lexer* — done. Syntax highlighting. Extend with hover tooltips
+   identifying the lexeme type.
+2. *Parser / AST* — in progress. Tree visualization. Next: interactive
+   highlighting (click node → highlight source span).
+3. *Bytecode* — planned. Linear list of VM instructions. Jump arcs
+   connecting source/target offsets. Straightforward because clox's
+   bytecode is a flat list (unlike SSA or CFG).
+4. *Control flow graph* — possible future. Basic blocks as nodes,
+   branches as edges. Needs a graph layout (dagre or force-directed)
+   rather than a tree layout.
+5. *IR / optimized form* — possible future. Languages like Rust and
+   C++ compile through LLVM IR (SSA form). GraalVM uses "sea of nodes"
+   which is the most graph-like IR — control and data flow edges
+   unified into a single graph.
+
+** The ~start~ field as a cross-phase coordinate
+
+All phases share the same byte offset coordinate system. Lexer events,
+parser events, and (if implemented carefully) bytecode events can all
+carry a ~start~ that refers to the same position in the source
+string. This is what makes cross-phase interaction (click a bytecode
+instruction → highlight the corresponding AST node and source lexemes)
+tractable.
+
+The caveat for bytecode: clox's chunk offsets reset to 0 per function,
+so bytecode events would need to carry source ~start~ (not chunk
+offset) to participate in this coordinate system.
+
+** The missing span
+
+~AstNode~ currently has no position information. The ~start~ from
+parser events is used transiently during parsing to look up attribute
+values, but is not stored on the node. For interactive highlighting of
+a node's source span, both a ~spanStart~ and ~spanEnd~ are needed. The
+information is available — the OPEN event's ~start~ gives the
+beginning, the CLOSE event's ~start~ gives the end — but is currently
+discarded.
+
+This will be addressed after: (1) the C protocol is verified correct,
+(2) the JS adapter produces correct output for all existing node
+types, (3) the protocol is extended for unimplemented node types, (4)
+the JS adapter is updated for those.
+
+** Generalizing the approach
+
+The protocol + adapter pattern is worth carrying forward even if the
+specific code doesn't generalize. The insight: every compiler has a
+parsing strategy, and the adapter's job is to know that strategy and
+produce a normalized tree from it. A compiler that builds an AST
+internally (jlox, most production compilers) makes this trivial — walk
+the AST and emit prefix-order events. A single-pass compiler (clox)
+requires understanding the evaluation order (postfix for Pratt-parsed
+expressions) and writing the adapter accordingly.
+
+The d3 tree layout assumes a rooted tree with no shared nodes. This is
+correct for ASTs but not for SSA/DAG IRs. If IR visualization is ever
+attempted, a graph layout (d3 force simulation or dagre) would be
+needed.

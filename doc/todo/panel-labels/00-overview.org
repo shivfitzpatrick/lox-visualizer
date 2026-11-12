@@ -1,0 +1,117 @@
+#+title: Panel Labels — Overview
+#+date: 2026-06-19
+
+Add small descriptive labels to every compiler-viz pane.  Each label sits in the
+*upper-right* corner, *above* the pane chrome, inset from the right edge to
+line up with the pane's rounded border (currently ~border-radius: 20px~).
+
+* Goal end-state
+
+Every pane in a ~VisualizerLayout~ shows a human-readable label before its
+content shell:
+
+| Kind | Label |
+|------+-------|
+| ~editor~ | Source |
+| ~lexer~ | Lexer |
+| ~ast~ | Parser |
+| ~bytecode~ | Bytecode |
+| ~stack~ | Stack |
+| ~console~ | Output |
+| ~playback~ | Playback |
+
+Labels are created automatically by ~buildLayoutDOM~ — no per-panel or per-post
+markup.  Both the Lox and Python visualizers pick them up through the shared
+mount path.
+
+* Visual target
+
+#+begin_example
+                                    Lexer
+                    ┌──────────────────────────────┐
+  Source            │  token stream …              │
+┌──────────────┐    └──────────────────────────────┘
+│  print 1;    │
+│              │
+└──────────────┘
+  [ Run ]
+
+                                 Parser
+                    ┌──────────────────────────────┐
+                    │  (AST svg)                   │
+                    └──────────────────────────────┘
+#+end_example
+
+- Label text is right-aligned above the pane, with ~padding-right~ matching the
+  pane corner radius so the label's right edge visually meets the inner curve.
+- Typography: small caps / uppercase, muted color (~#888~), mono stack — same
+  family as the visualizer body.
+- Labels are *not* interactive; they do not participate in selection or
+  connectors.
+
+* Prerequisite
+
+- [[file:00-ast-shell-border.org][00-ast-shell-border.org]] — move AST chrome from inner
+  ~svg~ to ~.lox-panel--ast~ so labels align with the visible pane box (same as
+  lexer, bytecode, etc.)
+
+* Phases
+
+** Phase 1 — Metadata (no DOM)
+
+- [[file:01-label-metadata.org][01-label-metadata.org]] — ~panelLabel(kind)~ map in ~layout.ts~
+
+** Phase 2 — DOM + CSS (sequential: 02 then 03)
+
+- [[file:02-pane-wrapper-dom.org][02-pane-wrapper-dom.org]] — ~.lox-pane~ wrapper + label element in ~mount.ts~
+- [[file:03-label-css.org][03-label-css.org]] — positioning, flex retarget, per-kind tweaks
+
+** Phase 3 — Verification
+
+- [[file:04-tests-polish.org][04-tests-polish.org]] — mount tests, visual QA, mobile note
+
+* Dependency graph
+
+#+begin_example
+00-ast-shell-border (prerequisite, independent)
+01-label-metadata ──→ 02-pane-wrapper-dom ──→ 03-label-css ──→ 04-tests-polish
+#+end_example
+
+00 can land anytime before labels.  01 is a pure-data addition and can land
+alone.  02 depends on ~panelLabel~ from 01.  03 depends on the ~.lox-pane~ /
+~.lox-panel-label~ class names from 02.  04 validates the full stack.
+
+* File locations
+
+| Stream | Files |
+|--------+-------|
+| 00     | ~static/css/lox-visualizer.css= |
+| 01     | ~app/src/compiler-viz/layout.ts=, ~app/src/compiler-viz/layout.test.ts= |
+| 02     | ~app/src/compiler-viz/mount.ts=, ~app/src/compiler-viz/mount.test.ts= |
+| 03     | ~static/css/lox-visualizer.css= |
+| 04     | ~app/src/compiler-viz/mount.test.ts= (assertions), manual QA |
+
+* Out of scope (for now)
+
+- Per-post or ~data-layout~ label overrides (English strings are fixed).
+- i18n / localization.
+- Renaming ~PanelKind~ values (~ast~ stays ~ast~; only the *display* label is
+  "Parser").
+
+* Design reference
+
+Target DOM shape (settled in 02):
+
+#+begin_example
+.lox-visualizer
+  .lox-visualizer-row
+    .lox-pane
+      .lox-panel-label     "Source"
+      .lox-panel.lox-panel--editor   ← containers Map still points here
+    .lox-pane
+      .lox-panel-label     "Lexer"
+      .lox-panel.lox-panel--lexer
+#+end_example
+
+Panel components continue to receive the inner ~.lox-panel~ shell as their
+~container~ — no changes to ~LexerPanel~, ~AstPanel~, etc.

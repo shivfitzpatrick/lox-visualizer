@@ -1,0 +1,112 @@
+#+title: Phase 2b — Move Pure Renderers to compiler-viz/
+#+date: 2026-06-18
+#+phase: 2b (after 04; parallel with 06)
+
+Move the language-neutral rendering utilities from ~lox-visualizer/~ to
+~compiler-viz/~.  Leave re-export stubs at the old paths so existing imports
+keep compiling.
+
+* Background
+
+These files contain no Lox-specific logic today:
+
+| File | Notes |
+|------+-------|
+| ~connector-layer.ts~ | Anchor/line overlay, fully generic |
+| ~ast.ts~ | d3 tree renderer; ~AstNode~ is already neutral |
+| ~bytecode.ts~ | Table renderer; after 02 it consumes ~Instruction~, not ~CompilerEvent~ |
+| ~theme.ts~ | Default palette; ~ColorScheme~ / ~TokenCategory~ from ~state/token.ts~ |
+| ~d3-utils.ts~ | ~panelSelection~ / ~selectionNode~ helpers |
+
+Moving them makes ~compiler-viz/~ self-contained; the ~lox-visualizer/~ stubs
+become one-liner re-exports.
+
+* Tasks
+
+** DONE Move ~connector-layer.ts~
+   :PROPERTIES:
+   :files: app/src/compiler-viz/connector-layer.ts (new),
+           app/src/lox-visualizer/connector-layer.ts (stub)
+   :END:
+
+Move the file.  Old path becomes:
+
+#+begin_src typescript
+export * from '@/compiler-viz/connector-layer';
+#+end_src
+
+Update ~connector-layer.test.ts~ import path (or move the test file alongside).
+
+** DONE Move ~ast.ts~
+   :PROPERTIES:
+   :files: app/src/compiler-viz/ast.ts (new),
+           app/src/lox-visualizer/ast.ts (stub)
+   :END:
+
+Move the file.  No logic changes — ~AstNode~ is already generic.
+
+Old path stub:
+
+#+begin_src typescript
+export * from '@/compiler-viz/ast';
+#+end_src
+
+Move ~ast.test.ts~ to ~compiler-viz/ast.test.ts~ and update the import.
+
+** DONE Move ~bytecode.ts~
+   :PROPERTIES:
+   :files: app/src/compiler-viz/bytecode.ts (new),
+           app/src/lox-visualizer/bytecode.ts (stub)
+   :END:
+
+Move the file.  ~Instruction~ import updates from ~@/lox-visualizer/lox-data~
+to ~@/compiler-viz/types~.
+
+Old path stub:
+
+#+begin_src typescript
+export * from '@/compiler-viz/bytecode';
+#+end_src
+
+** DONE Move ~theme.ts~
+   :PROPERTIES:
+   :files: app/src/compiler-viz/theme.ts (new),
+           app/src/lox-visualizer/theme.ts (stub)
+   :END:
+
+Move the file.  ~ColorScheme~ and ~TokenCategory~ continue to be imported from
+~@/lox-visualizer/state/token~ (moving them is a Phase 2 non-goal).
+
+Old path stub:
+
+#+begin_src typescript
+export * from '@/compiler-viz/theme';
+#+end_src
+
+** DONE Move ~d3-utils.ts~
+   :PROPERTIES:
+   :files: app/src/compiler-viz/d3-utils.ts (new),
+           app/src/lox-visualizer/d3-utils.ts (stub)
+   :END:
+
+Move the file.  No logic changes.
+
+Old path stub:
+
+#+begin_src typescript
+export * from '@/compiler-viz/d3-utils';
+#+end_src
+
+* Acceptance
+
+- ~compiler-viz/~ contains ~connector-layer.ts~, ~ast.ts~, ~bytecode.ts~,
+  ~theme.ts~, ~d3-utils.ts~.
+- Old ~lox-visualizer/*~ paths are one-liner re-export stubs.
+- Existing test files that import the old paths still pass without modification
+  (or are updated to new paths — either is fine).
+- Vitest green; no ~lox-visualizer/~ file changes outside of stubs.
+
+* Notes
+
+Parallel with [[file:06-compiler-viz-shell.org][06]] — they touch non-overlapping files.  Both must
+land before [[file:07-compiler-viz-panels.org][07]] (panels import from both streams).

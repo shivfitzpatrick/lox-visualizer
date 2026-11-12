@@ -1,0 +1,76 @@
+#+title: Non-Termination — Don't Freeze the Tab
+#+date: 2026-08-03
+#+phase: 3
+#+TODO: TODO NEXT IN-PROGRESS WAITING | DONE CANCELLED
+
+~runSource~ is synchronous and blocks the main thread, so ~while (true) {}~ in
+the editor freezes the whole page — no error, no UI, kill the tab.
+
+* Background
+
+~MAX_STEPS = 10_000~ in ~lox-visualizer.ts~ does *not* help: it caps how many
+~vm_step~ events are buffered, not how long the VM runs.  Its warning can only
+print after ~runSource~ returns, which is exactly what never happens.
+
+Two options, cheap first.
+
+* 4a — Step budget in the C dispatch loop
+
+** TODO Add an instruction budget to the VM
+   :PROPERTIES:
+   :files:    clox/src/lib/vm.c
+   :END:
+
+Counter in the dispatch loop; past a budget, call ~runtimeError~ with
+"execution exceeded N instructions — possible infinite loop" and return
+~INTERPRET_RUNTIME_ERROR~.
+
+Budget: something like 10M — far above any sample program on the blog, far
+below a noticeable freeze.  Measure how long 10M dispatches actually take in
+the wasm build before fixing the number; ~-O0~ (see stream 04) makes this much
+slower than the native build would suggest.
+
+Depends on stream 02: with ~exit()~ gone, this surfaces as an ordinary error and
+the visualizer stays interactive.  Without 02 it would throw like everything
+else.
+
+Note this is a *different* number from the frontend's ~MAX_STEPS~, which stays
+as a buffer cap.  Name it distinctly in the C source to avoid the two being
+conflated later.
+
+** TODO Distinguish the two cap messages in the UI
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+"we stopped recording after 10,000 steps" and "we stopped executing after 10M
+instructions" mean different things to a reader.  Today only the first exists
+and it is phrased as if it were the second ("program may have an infinite
+loop").  Reword the frontend one once the C one exists.
+
+* 4b — Move the module into a Web Worker (deferred)
+
+** TODO Evaluate worker migration
+   :PROPERTIES:
+   :files:    new worker harness; lox-core.ts, lox-visualizer.ts
+   :END:
+
+The real fix: run the WASM off the main thread, post events back, and offer a
+"Stop" button backed by ~worker.terminate()~.  Also makes crash recovery
+possible — spawn a fresh worker instead of asking for a page reload (stream 03).
+
+Cost: the whole event stream (~stdout~, ~print~, ~lexer~, ~parser~, ~compiler~,
+~vm_step~) becomes asynchronous.  ~setUp~/~rerun~ become genuinely async, the
+~requestAnimationFrame~ render scheduling changes, and the ~stepBuffer~ /
+~printBuffer~ accumulation moves behind ~postMessage~ (or a ~SharedArrayBuffer~,
+which brings COOP/COEP header requirements — check what Vercel allows before
+going down that path).
+
+Not worth starting until 01–04 are in.  If the Python visualizer's Pyodide path
+is ever moved to a worker for the same reason, the two should share the harness
+— which is an argument for designing this one generically when it does happen.
+
+* Done when
+
+A runaway program produces a message and an interactive page, not a tab that
+has to be killed.

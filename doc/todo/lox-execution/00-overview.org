@@ -1,0 +1,73 @@
+#+title: Lox VM Execution Visualization — Overview
+#+date: 2026-06-18
+
+This directory breaks the design described in ~design.org~ into parallelizable
+work streams.  Each numbered file is a self-contained stream meant to be done in
+order by one person or agent.  Files with the same phase number have no
+inter-dependencies and can be worked *in parallel*.
+
+* Goal end-state
+
+A new "Run" mode for the lox visualizer.  After compilation:
+1. The VM runs and emits a =vm_step= event after each instruction dispatch,
+   carrying the instruction that executed plus a full stack snapshot.
+2. The frontend records all steps into an =ExecutionStore=.
+3. A =StackPanel= displays the stack contents for the current playback step.
+4. The bytecode panel shows a ► arrow on the currently executing instruction
+   (separate from the user's click-selection state).
+5. A playback controls bar lets the user step through, scrub, or auto-play.
+
+* Phases and parallelism
+
+** Phase 1 — Parallel foundations (no inter-dependencies)
+
+01 and 02 touch entirely disjoint codebases (C vs. TypeScript) and can be done
+simultaneously.  The event JSON shape is already specified in ~design.org~, so
+02 does not need 01 to compile first.
+
+- [[file:01-c-event.org][01-c-event.org]] — =printValueJson= + =emitVmStep= in the clox C source
+- [[file:02-ts-types.org][02-ts-types.org]] — =VmStep= types, =ExecutionStore=, =vm_step= event wiring
+
+** Phase 2 — Parallel build-out (after 02)
+
+All three streams depend on the TypeScript types and store from 02.  They touch
+disjoint files (stack panel, bytecode panel, playback controls) and can be done
+simultaneously.
+
+- [[file:03-stack-panel.org][03-stack-panel.org]] — new =StackPanel= visualization
+- [[file:04-bc-arrow.org][04-bc-arrow.org]] — execution arrow in the bytecode panel
+- [[file:05-playback-controls.org][05-playback-controls.org]] — playback controls bar (step, scrub, auto-play)
+
+** Phase 3 — Polish (after 03, 04, 05)
+
+- [[file:06-polish.org][06-polish.org]] — keyboard shortcuts, auto-play speed, step-count cap, connector
+
+* Dependency graph
+
+#+begin_example
+01-c-event ────────────────────────────────────────────────────────┐
+                                                                   ↓
+02-ts-types ──┬──→ 03-stack-panel ─────────────────────────→ 06-polish
+              ├──→ 04-bc-arrow ─────────────────────────────→
+              └──→ 05-playback-controls ────────────────────→
+#+end_example
+
+Note: 01 does not block any TypeScript work.  The event shape is fixed in the
+design doc.  The C and TypeScript streams can land independently; they only
+need to meet for end-to-end testing.
+
+* File locations
+
+| Stream | New or modified files |
+|--------+----------------------|
+| 01     | =clox/src/vm.c= (or wherever the dispatch loop lives); value serialization helper |
+| 02     | =app/src/compiler-viz/execution.ts= (new), =app/src/lox-visualizer/lox-core.ts= |
+| 03     | =app/src/compiler-viz/panels/stack-panel.ts= (new) |
+| 04     | =app/src/compiler-viz/panels/bytecode-panel.ts=, =app/src/lox-visualizer/bytecode.ts= |
+| 05     | =app/src/compiler-viz/panels/playback-controls.ts= (new) |
+| 06     | scattered; small edits to 03, 04, 05 and the orchestrator |
+
+* Design reference
+
+See ~design.org~ in this directory for the full rationale, event JSON schema,
+TypeScript interfaces, and implementation notes for each stream.

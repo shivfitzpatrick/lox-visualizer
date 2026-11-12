@@ -1,0 +1,260 @@
+#+TITLE: TypeScript Migration: lox-visualizer
+#+DATE: 2026-03-13
+
+* Big Picture
+
+The lox-visualizer started as untyped JavaScript that got a ~.ts~ extension
+without real types. The goal of the migration is not aesthetic — it's
+diagnostic. The parser (~parseExpressionNode~, ~parseExpression~, ~parseNode~)
+has broken logic that's hard to reason about precisely because data flowing
+through it has no declared shape. Adding types forces the question: /what is
+this actually supposed to be?/
+
+The migration proceeded file by file, running ~tsc --noEmit~ after each change
+to track the shrinking error list. Files touched, roughly in order:
+
+- ~test/index.ts~
+- ~lox-core.ts~
+- ~state/token.ts~
+- ~ast.ts~
+- ~events.ts~ (new)
+- ~lox-visualizer-demo.ts~
+- ~state/state.ts~ (partial — parser functions deferred)
+
+The parser functions (~parseExpressionNode~ etc.) were left untyped
+intentionally. The logic needs to be fixed before the types can be written
+honestly.
+
+* Key Concepts Encountered
+
+** Enums
+
+~TokenType~ was originally a plain array of strings. It was replaced with a
+TypeScript numeric enum:
+
+#+begin_src typescript
+export enum TokenType {
+    TOKEN_LEFT_PAREN,   // = 0
+    TOKEN_RIGHT_PAREN,  // = 1
+    // ...
+    TOKEN_EOF,          // = 44
+}
+#+end_src
+
+Numeric enums mirror C enums — the values auto-increment from 0, matching the
+indices that the Emscripten-compiled clox WASM sends over. TypeScript generates
+a /reverse mapping/ automatically: ~TokenType[0]~ gives ~"TOKEN_LEFT_PAREN"~.
+This is used in ~mapTokenType~ to go from a raw integer event to a named key.
+
+~TokenCategory~ is a string enum (values are explicit strings), used to tag
+lexemes with their visual role:
+
+#+begin_src typescript
+export enum TokenCategory {
+    BRACE      = 'brace',
+    IDENTIFIER = 'identifier',
+    KEYWORD    = 'keyword',
+    LITERAL    = 'literal',
+    OPERATOR   = 'operator',
+    PAREN      = 'paren',
+}
+#+end_src
+
+String enums don't get a reverse mapping. Their advantage is that their values
+are readable in the browser devtools rather than being integers.
+
+** ~Record<K, V>~ and Mapped Types
+
+~Record<K, V>~ is shorthand for an object type where every key of type ~K~ maps
+to a value of type ~V~. It's equivalent to ~{ [key in K]: V }~.
+
+Used in ~TOKEN_TYPE_MAP~ to ensure every key of ~TokenType~ is accounted for:
+
+#+begin_src typescript
+export const TOKEN_TYPE_MAP: Record<keyof typeof TokenType, { category: TokenCategory | null }> = {
+    TOKEN_LEFT_PAREN: { category: TokenCategory.PAREN },
+    // ... all 45 entries required by the type
+};
+#+end_src
+
+~keyof typeof TokenType~ extracts the string names of the enum members as a
+union: ~"TOKEN_LEFT_PAREN" | "TOKEN_RIGHT_PAREN" | ...~. Without ~typeof~,
+~keyof TokenType~ would give you the methods on the enum value (not useful).
+
+** Abstract Classes and Generics
+
+~LoxState~ needs a generic key-safe property bag with typed getters and setters.
+The solution: an abstract generic base class.
+
+#+begin_src typescript
+abstract class State<T extends Record<string, unknown>> {
+    abstract props: T;
+
+    get<K extends keyof T>(name: K): T[K] { return this.props[name]; }
+    set<K extends keyof T>(name: K, value: T[K]): T[K] { return this.props[name] = value; }
+
+    push<K extends keyof T>(
+        name: K,
+        value: T[K] extends unknown[] ? T[K][number] : never
+    ): void {
+        (this.props[name] as unknown[]).push(value);
+    }
+}
+#+end_src
+
+The constraint ~T extends Record<string, unknown>~ is required because plain
+~object~ and ~{}~ don't permit index access in TypeScript's type system.
+~Record<string, unknown>~ explicitly declares that any string key is valid to
+look up, even if the result type varies.
+
+The ~push~ method uses a *conditional type*: ~T[K] extends unknown[] ? T[K][number] : never~.
+This says: if the property at key ~K~ is an array, the parameter type is the
+array's element type; otherwise the parameter type is ~never~ (making the call
+a type error). This gives push the same key safety as get/set without needing
+separate method signatures.
+
+~abstract props: T~ forces subclasses to declare and initialize the property.
+This is the TypeScript equivalent of an interface requirement on a class field.
+
+** ~type~ vs ~interface~ for Generic Constraints
+
+~LoxStateProps~ was initially written as an ~interface~. This caused a type
+error when passed as the ~T~ in ~State<T extends Record<string, unknown>>~.
+
+The reason: interfaces with no explicit index signature don't /satisfy/
+~Record<string, unknown>~ as a constraint, even if all their properties are
+compatible. TypeScript's assignability rules treat them differently. Changing
+to ~type~ fixes this:
+
+#+begin_src typescript
+type LoxStateProps = {
+    text: string | null;
+    lexerEvents: LexerEvent[];
+    // ...
+}
+#+end_src
+
+The rule of thumb: use ~type~ when you need to satisfy a generic constraint
+involving ~Record~ or index signatures.
+
+** Conditional Types
+
+Conditional types follow the form ~A extends B ? C : D~. They can appear
+inside generic functions to make the return type depend on the input type.
+
+A simpler example of the pattern (not from this codebase, for illustration):
+
+#+begin_src typescript
+type Flatten<T> = T extends unknown[] ? T[number] : T;
+// Flatten<string[]> = string
+// Flatten<string>   = string
+#+end_src
+
+The TypeScript docs and the [[https://www.typescriptlang.org/docs/handbook/2/conditional-types.html][handbook chapter on conditional types]] are the best
+resource for going deeper. The key insight is that they let you express
+relationships between types that would otherwise require overloads.
+
+** Discriminated Unions and the ~events.ts~ Split
+
+~LexerEvent~ and ~ParserEvent~ were previously untyped objects. They were
+extracted into a new ~events.ts~ file as interfaces:
+
+#+begin_src typescript
+export interface LexerEvent {
+    msg_type: 'lexer';
+    start: number;
+    length: number;
+    type: number;
+    text: string;
+}
+
+export interface ParserEvent {
+    msg_type: 'parser';
+    start: number;
+    action: string;
+    node_type?: string;
+    value?: string;
+    children?: number;
+}
+#+end_src
+
+The ~msg_type~ field (a string literal type) makes these a /discriminated
+union/ — you can narrow the type with ~if (event.msg_type === 'lexer')~. This
+is the idiomatic TypeScript pattern for typed event systems.
+
+** ~ColorScheme~ and Moving Types to the Right File
+
+The color scheme for the AST visualization was originally a plain object in
+~lox-visualizer-demo.ts~ with no type. It was:
+
+1. Given a name (~ColorScheme~)
+2. Typed as ~{ background: string } & Partial<Record<TokenCategory, string>>~
+3. Moved to ~token.ts~, where ~TokenCategory~ is defined
+
+~Partial<Record<TokenCategory, string>>~ means: an object that /may/ have an
+entry for each token category, but doesn't have to. The ~background~ field is
+required (not in the Partial). The intersection (~&~) combines the two.
+
+** d3 Type Quirks
+
+d3's TypeScript types reflect some unusual design decisions:
+
+- ~zoom()~ defaults to ~ZoomBehavior<Element, unknown>~. When the target SVG
+  element is a ~Selection<SVGSVGElement, ...>~, you must write
+  ~zoom<SVGSVGElement, unknown>()~ to avoid a type mismatch.
+
+- ~tree()~ is generic over node data: ~tree<AstNode>()~.
+
+- After ~tree(root)~ lays out the hierarchy, every node's ~x~ and ~y~
+  coordinates are typed as ~number | undefined~ even though they are guaranteed
+  to be present post-layout. d3's design is to mutate the nodes in place rather
+  than returning a typed result. The fix is non-null assertion: ~d.x!~, ~d.y!~.
+  This is a case where the type is technically wrong and the assertion is the
+  honest response.
+
+- ~.style()~ and ~.attr()~ don't accept ~undefined~ as a value. When a
+  ~Partial<Record<...>>~ lookup can return ~undefined~, use ~?? null~ to
+  convert it.
+
+** Emscripten WASM and ~@ts-ignore~
+
+~lox-core.ts~ imports an Emscripten-generated file (~lox.js~) via an absolute
+URL path:
+
+#+begin_src typescript
+// @ts-ignore: lox.js is an Emscripten-generated file built separately
+const { default: createLoxWasm } = await import('/js/lox-visualizer/lox.js')
+    as { default: (options?: LoxModuleOptions) => Promise<LoxModule> };
+#+end_src
+
+The ~@ts-ignore~ is intentional. TypeScript with ~moduleResolution: "bundler"~
+cannot resolve absolute URL paths (~/js/...~) to a type declaration. The
+alternative — writing a ~declare module '/js/...'~ — doesn't work for absolute
+URL paths in this module resolution mode. The inline ~as~ cast supplies the
+type after the fact. Interfaces for ~LoxModuleOptions~ and ~LoxModule~ were
+written by hand to describe the parts of the API actually used.
+
+* Files and Their State After Migration
+
+| File                           | Status                                      |
+|--------------------------------+---------------------------------------------|
+| ~state/token.ts~               | Clean — enum, map, ColorScheme              |
+| ~ast.ts~                       | Clean — AstNode interface, typed drawAst    |
+| ~events.ts~                    | Clean (new file) — LexerEvent, ParserEvent  |
+| ~lox-core.ts~                  | Clean — @ts-ignore for WASM import          |
+| ~lox-visualizer-demo.ts~       | Clean — LoxVisualizer class fully typed     |
+| ~test/index.ts~                | Clean — typed testSuite (now deprecated)    |
+| ~state/state.ts~               | Partial — State<T>, LoxState clean;         |
+|                                | parseExpressionNode etc. still untyped      |
+| ~lib/component.ts~             | ~children~ property still needs declaration |
+| ~lib/styles.ts~                | ~href~ parameter still needs annotation     |
+
+* What's Left
+
+The remaining ~tsc~ errors are in the parser functions (~parseExpressionNode~,
+~parseExpression~, ~parseNode~). These were explicitly deferred because the
+/logic/ is wrong — one test is already failing that proves it. Typing them now
+would mean writing types that describe broken behavior. The right order is:
+
+1. Fix the parser logic (use the failing test as the spec)
+2. Then add types to the now-correct functions

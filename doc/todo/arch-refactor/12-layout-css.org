@@ -1,0 +1,111 @@
+#+title: Layout CSS Migration
+#+date: 2026-06-18
+#+phase: 4b (after 09 — parallel with 10 and 11)
+
+Retarget ~static/css/lox-visualizer-demo.css~ from post-planted *ids* to
+*layout classes* so styling survives programmatic mount and multi-instance roots.
+
+* Background
+
+CSS today assumes author-placed ids:
+
+| Selector | What it styles |
+|----------+----------------|
+| ~.lox-editor-lexer-row~ | flex row for editor + lexer |
+| ~#lox-lexer~, ~.lox-editor-box~, ~#lox-console~ | shared white border chrome |
+| ~#lox-ast svg~ | AST canvas border |
+| ~#lox-compiler~ | bytecode panel chrome |
+| ~#lox-console:not(:empty)~ | hide empty console |
+
+After mount (10), structure is class-driven:
+
+#+begin_example
+.lox-visualizer
+  .lox-visualizer-row
+    .lox-panel.lox-panel--editor …
+    .lox-panel.lox-panel--lexer  …
+  .lox-visualizer-row
+    .lox-panel.lox-panel--ast    …
+#+end_example
+
+* Tasks
+
+** DONE Replace row selector
+   :PROPERTIES:
+   :files:    static/css/lox-visualizer-demo.css
+   :END:
+
+- ~.lox-editor-lexer-row~ → ~.lox-visualizer-row~ (same flex rules).
+- Row-specific flex children: ~.lox-visualizer-row .lox-panel--editor~ and
+  ~.lox-visualizer-row .lox-panel--lexer~ get ~flex: 1; min-width: 0~ (replaces
+  ~.lox-editor-lexer-row .lox-editor-container~ / ~#lox-lexer~ rules).
+
+Keep ~.lox-editor-lexer-row~ as a deprecated alias *only if* old posts still
+exist during migration — otherwise delete.
+
+** DONE Migrate panel chrome to ~.lox-panel--*~
+   :PROPERTIES:
+   :files:    static/css/lox-visualizer-demo.css
+   :END:
+
+| Old | New |
+|-----+-----|
+| ~#lox-lexer~ border block | ~.lox-panel--lexer~ |
+| ~#lox-console~ border + margin | ~.lox-panel--console~ |
+| ~#lox-compiler~ | ~.lox-panel--bytecode~ |
+| ~#lox-ast svg~ border | ~.lox-panel--ast svg~ |
+
+Shared chrome (border, radius, padding) can use a grouped selector:
+
+#+begin_src css
+.lox-panel--lexer,
+.lox-panel--console,
+.lox-panel--bytecode,
+.lox-editor-box { … }
+#+end_src
+
+** DONE Console visibility
+   :PROPERTIES:
+   :files:    static/css/lox-visualizer-demo.css
+   :END:
+
+Replace ~#lox-console:not(:empty)~ with ~.lox-panel--console:not(:empty)~.
+
+If console is omitted from a layout, the pane shell never mounts — no rule needed.
+
+** DONE Cross-panel highlight selectors
+   :PROPERTIES:
+   :files:    static/css/lox-visualizer-demo.css
+   :END:
+
+~#lox-lexer span.bc-highlight~ → ~.lox-panel--lexer span.bc-highlight~ (or
+~.lox-visualizer span.bc-highlight~ if simpler).  Grep the file for remaining
+~#lox-~ prefixes and migrate or delete.
+
+** DONE Bytecode inner selectors
+   :PROPERTIES:
+   :files:    static/css/lox-visualizer-demo.css
+   :END:
+
+~#lox-compiler details~, ~#lox-compiler summary.bc-chunk-name~, etc. → prefix with
+~.lox-panel--bytecode~.
+
+* Dependencies
+
+- Class names must match 09/10 exactly (~lox-visualizer-row~, ~lox-panel--{kind}~).
+- Can land before 13 visually breaks if old id-based post markup still exists —
+  *prefer landing with 13* so one commit doesn't leave mismatched CSS/DOM.
+
+* Acceptance
+
+- No ~#lox-~ selectors remain except optionally ~#lox-compiler~ if 10 keeps
+  that legacy id on the shell (then duplicate rules are unnecessary — pick
+  classes only).
+- ~.lox-visualizer-row~ with two panes side-by-side matches today's editor+
+  lexer spacing.
+- AST svg border, bytecode table, console error color unchanged visually.
+
+* Open questions
+
+- Rename CSS file ~lox-visualizer-demo.css~ → ~lox-visualizer.css~?  Deferred
+  unless the user wants it — updating ~setupStyles~ path is a one-liner in 13.

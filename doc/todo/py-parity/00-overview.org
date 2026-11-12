@@ -1,0 +1,80 @@
+#+title: Python Visualizer — Lox Parity Overview
+#+date: 2026-06-19
+
+This directory breaks [[file:design.org][design.org]] into parallelizable work
+streams.  Each numbered file is a self-contained sequence meant to be done in
+order by one person or agent.  Files with the same phase number have no
+inter-dependencies and can be worked *in parallel*.
+
+* Goal end-state
+
+The Python visualizer matches the Lox visualizer's recent improvements:
+
+1. Live execution trace with step-by-step playback.
+2. Stack panel (simulated evaluation stack), bytecode ► arrow, AST highlight.
+3. Console prints synced to playback step.
+4. Shared shell features (panel labels, responsive layout) working on Python posts.
+
+* Phases and parallelism
+
+** Phase 0 — Quick wins (no emitter changes)
+
+Orchestrator-only; can land immediately.
+
+- [[file:01-orchestrator-wiring.org][01-orchestrator-wiring.org]] — bc-exec connector, executionStore field, reset on run
+
+** Phase 1 — Execution emitter (Python / Pyodide)
+
+Single stream; all work in ~emitter.py~ and ~py-data.ts~ types.  Blocks Phase 2.
+
+- [[file:02-execution-emitter.org][02-execution-emitter.org]] — sys.monitoring trace, stdout capture, stack simulation, JSON output
+
+** Phase 2 — Orchestrator execution wiring (after Phase 1)
+
+- [[file:03-execution-orchestrator.org][03-execution-orchestrator.org]] — populate ExecutionStore, console split, MAX_STEPS
+
+** Phase 3 — Verification
+
+- [[file:04-tests-polish.org][04-tests-polish.org]] — vitest, browser smoke, optional layout restore on pyvis post
+
+** Phase 4 — Shared shell follow-ups
+
+Nothing outstanding.  Responsive layout is handled entirely in
+~static/css/lox-visualizer.css~ by wrapping flex rows, so
+~python-visualizer.ts~ needs no viewport hook of its own — it inherits the
+behavior by mounting the same DOM.
+
+* Dependency graph
+
+#+begin_example
+01-orchestrator-wiring ─────────────────────────────────────────────┐
+                                                                    │
+02-execution-emitter ──→ 03-execution-orchestrator ──→ 04-tests ──┤
+#+end_example
+
+01 does not block 02.  03 requires 02.  04 requires 03.
+
+* File locations
+
+| Stream | Primary files |
+|--------+---------------|
+| 01     | ~app/src/python-visualizer/python-visualizer.ts~ |
+| 02     | ~app/src/python-visualizer/emitter.py~, ~py-data.ts~ |
+| 03     | ~app/src/python-visualizer/python-visualizer.ts~ |
+| 04     | ~py-data.test.ts~, ~content/posts/pyvis.md~, browser QA |
+
+* What is already done (no task file needed)
+
+| Improvement | Why Python already has it |
+|-------------+---------------------------|
+| Panel labels | ~mount.ts~ ~buildLayoutDOM~ — shared mount path |
+| StackPanel / PlaybackControls / execution-aware panels | ~createDefaultPanelRegistry~ |
+| Playback / stack CSS | ~static/css/lox-visualizer.css~ |
+| Static lex → AST → bytecode connectors | ~emitter.py~ + shared panels |
+| Pyodide runtime | ~py-core.ts~ + ~loadPyCore~ |
+| Console playback fallback | ~ConsolePanel~ renders ~consoleStore~ when ~steps.length === 0~ |
+
+* Design reference
+
+See [[file:design.org][design.org]] for the full gap analysis, event schema,
+stack simulation strategy, and out-of-scope items.

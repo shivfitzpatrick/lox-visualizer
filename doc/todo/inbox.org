@@ -1,0 +1,101 @@
+#+TITLE: GTD Inbox
+#+DATE: 2026-03-13
+#+TODO: TODO NEXT IN-PROGRESS WAITING | DONE CANCELLED
+
+* Inbox
+Items captured here, not yet processed.
+
+* Next
+Concrete next actions — single physical steps ready to do.
+
+* Projects
+Multi-step outcomes being actively tracked.
+
+** Lox Visualizer
+*** Tasks
+**** Scope MVP
+***** What is this actually supposed to do?
+*** Backlog
+**** DONE Simple program to test with
+
+**** DONE Visualize Lexer
+***** TODO Create a post
+***** DONE Display text of transpiler program
+***** DONE produce a list of tokens that can be consumed
+***** DONE Highlight the program
+***** TODO Writeup about this
+**** DONE Visualize Parser
+***** DONE d3 Tree
+***** DONE Output events from clox for parser statements
+***** DONE Output events from clox for parser expression
+***** TODO Fix bug with call expressions
+
+*** Old Notes
+to make things a little simpler, let's start with lox since we've got
+a working compiler
+
+- use one of the demo programs
+- define a fake test case with mock representations for each step
+- lexing the code
+- compiling to bytecode
+- executing the bytecode instructions
+- no ast because lox compiler doesn't create an ast
+- tracking the stack as the program runs
+  - this could get pretty interesting and sophisticated
+- link program output to instructions
+*** Done
+**** DONE Support unary expression nodes (~!~, ~-~)
+clox ~unary()~ emits no ~expressionNode~ event; the visualizer sees nothing for these sub-expressions.
+**** DONE Support literal expression nodes (~true~, ~false~, ~nil~)
+clox ~literal()~ emits no ~expressionNode~ event.
+**** DONE Support logical ~and~ / ~or~ expression nodes
+clox ~and_()~ / ~or_()~ emit no ~expressionNode~ events.
+**** DONE Support assignment expression nodes (~a = expr~)
+~namedVariable~ for the write case emits no ~expressionNode~ event.
+**** DONE Support property access expression nodes (~obj.prop~ get/set)
+clox ~dot()~ emits no ~expressionNode~ event for property get or set.
+**** DONE Support method invocation expression nodes (~obj.method(args)~)
+clox ~dot()~ + ~argumentList()~ (OP_INVOKE path) emit no ~expressionNode~ event.
+**** DONE Support super call expression nodes (~super.method(args)~)
+clox ~super_()~ emits no ~expressionNode~ event.
+**** DONE Add child_type labels to ~if~ statement branches
+~ifStatement()~ emits no ~childType~ for condition, then-branch, or else-branch.
+**** DONE Add child_type labels to ~for~ statement clauses
+~forStatement()~ emits no ~childType~ for initializer, condition, increment, or body.
+**** DONE Add child_type label to ~while~ condition
+~whileStatement()~ labels the body (~"Body"~) but not the condition expression.
+**** DONE Add child_type labels to ~switch~ discriminant and cases
+~switchStatement()~ emits no ~childType~ for the discriminant or case structure.
+**** DONE Add child_type label to ~return~ value expression
+~returnStatement()~ emits no ~childType~ before the return value expression.
+**** DONE Add child_type label to ~var~/~val~ initializer expression
+~varDeclaration()~ emits ~attr "name"~ but no ~childType~ for the initializer.
+**** DONE Add superclass and method children to ~class~ declaration
+~classDeclaration()~ emits ~open/closeNode("Class")~ but no events for superclass name or method children.
+** Proof of Induction
+** Resume
+- There should be a section of the website representing my resume
+- It should use my org mode resume to produce this page
+- I already use an org mode to hugo emacs plugin for the blog posts. we should take advantage of that
+*** Tasks
+**** DONE Create a make task for copy my resume from ~/Documents/org into this project
+put it in a logical place given the placement of posts.org in this project
+**** DONE Add a new page to the site for my resume
+**** DONE Produce any necessary code for converting the resume to markdown, given how things work for posts
+**** DONE Add a header that's similar to the header in the pdf version of the resume using the info available in the org resume (my name, number, links to sites etc.)
+* Waiting For
+Items delegated or blocked on someone/something external.
+
+* Someday / Maybe
+Ideas to revisit when the time is right.
+
+** TODO Create ~data/series.toml~ and use it to generate series tables of contents
+Add a ~data/series.toml~ file grouping posts into named series (e.g. "Crafting
+Interpreters", "Java Ecosystem"). Wire it up in a layout template so each series
+gets a table of contents page or section rendered from the structured data rather
+than maintained by hand in markdown.
+
+See: [[file:../project_layout.org][project_layout.org]] § data/ for background.
+
+* Done
+Completed items archived here.

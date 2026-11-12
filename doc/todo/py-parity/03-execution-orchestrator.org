@@ -1,0 +1,54 @@
+#+title: Execution Store Wiring
+#+date: 2026-06-19
+#+phase: 2
+
+Wire emitter execution output into ~ExecutionStore~ so shared playback panels
+activate.  Depends on [[file:02-execution-emitter.org][02-execution-emitter]].
+
+* Tasks
+
+** TODO Publish steps and prints after run
+   :PROPERTIES:
+   :files: app/src/python-visualizer/python-visualizer.ts
+   :END:
+
+In ~run()~, after successful ~pyCore.run~:
+
+#+begin_src typescript
+const steps = result.data.steps ?? [];
+const prints = result.data.prints ?? [];
+this.executionStore.set({
+    steps,
+    prints,
+    currentStep: steps.length > 0 ? 0 : null,
+    playing: false,
+});
+#+end_src
+
+** TODO Split console: errors only when steps exist
+   :PROPERTIES:
+   :files: app/src/python-visualizer/python-visualizer.ts
+   :END:
+
+When ~steps.length > 0~, do *not* push ~type:'print'~ to ~consoleStore~ — prints
+flow through ~ExecutionStore~ and ~ConsolePanel~ playback mode.
+
+When ~steps.length === 0~ (compile-only failure or no execution), keep current
+fallback: all messages via ~consoleStore~.
+
+Errors always go to ~consoleStore~.
+
+** TODO Step cap warning
+   :PROPERTIES:
+   :files: app/src/python-visualizer/python-visualizer.ts
+   :END:
+
+If ~steps.length >= MAX_STEPS~, push error message to console (mirror Lox
+orchestrator).
+
+* Acceptance
+
+- Run ~print(x)~ sample: playback controls enable, scrubber moves bytecode ►.
+- Console print appears only at/after the step that executed ~print~.
+- Stack panel shows simulated stack rows.
+- AST highlight and bc-exec connector visible during playback.

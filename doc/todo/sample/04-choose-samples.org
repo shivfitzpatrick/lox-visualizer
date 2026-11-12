@@ -1,0 +1,131 @@
+#+title: Choose the Five Sample Programs
+#+date: 2026-08-11
+#+phase: 2 (can land last; 02/03 work with placeholders)
+#+TODO: TODO NEXT IN-PROGRESS WAITING | DONE CANCELLED
+
+Five programs, each chosen to light up a different part of the
+visualizer.  Constraints: standard Lox only (no ~%~ operator — it's
+not in the book's grammar; verify anything fancier against *this*
+clox before shipping), short enough that the AST stays readable and
+the execution trace stays well under the MAX_STEPS cap.
+
+* Proposed programs
+
+** 1. Fibonacci — ~fibonacci.lox~
+
+Shows: recursion, call-stack growth/shrink in the stack panel,
+~OP_CALL~/~OP_RETURN~ in bytecode.
+
+#+begin_src text
+fun fib(n) {
+  if (n < 2) return n;
+  return fib(n - 1) + fib(n - 2);
+}
+
+for (var i = 0; i < 8; i = i + 1) {
+  print fib(i);
+}
+#+end_src
+
+Tune the loop bound down if the trace is too long in practice.
+
+** 2. Closures — ~closures.lox~
+
+Shows: upvalues, ~OP_CLOSURE~, a function outliving its scope.
+
+#+begin_src text
+fun makeCounter() {
+  var count = 0;
+  fun increment() {
+    count = count + 1;
+    return count;
+  }
+  return increment;
+}
+
+var counter = makeCounter();
+print counter();
+print counter();
+print counter();
+#+end_src
+
+** 3. Classes & inheritance — ~inheritance.lox~
+
+Shows: classes, ~init~, ~this~, ~super~, method dispatch.
+
+#+begin_src text
+class Animal {
+  init(name) {
+    this.name = name;
+  }
+  speak() {
+    print this.name + " makes a sound.";
+  }
+}
+
+class Dog < Animal {
+  speak() {
+    super.speak();
+    print this.name + " barks!";
+  }
+}
+
+var rex = Dog("Rex");
+rex.speak();
+#+end_src
+
+** 4. Scopes & shadowing — ~scopes.lox~
+
+Shows: block scoping, shadowing, locals living on the stack — a
+classic "watch the slots" demo, and a nicely nested AST.
+
+#+begin_src text
+var a = "global";
+{
+  var a = "outer";
+  {
+    var a = "inner";
+    print a;
+  }
+  print a;
+}
+print a;
+#+end_src
+
+** 5. Loop printer — ~loop_printer.lox~
+
+The page's own sample (fenced block in ~content/visualizers.md~),
+seeded into ~samples/~ during the 01 work.  Shows: while loop,
+arithmetic, boolean operators (~!~, ~and~), function call with an
+expression argument.  Replaced the drafted star-triangle program,
+which overlapped it (loops + print) without adding a new panel story.
+
+* Tasks
+
+** TODO Verify each program against the real interpreter
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/samples/
+   :END:
+
+Paste each into the editor and Build.  Check: it runs, output is
+right, the trace is comfortably under MAX_STEPS, and every panel it's
+meant to show off actually shows something interesting.  This clox may
+diverge from book Lox (extensions or gaps) — the programs must match
+*this* implementation, not the book.
+
+** DONE Land the final files + labels
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/samples/, app/src/lox-visualizer/samples/index.ts
+   :END:
+
+Done as part of 02 (2026-08-11) — the drafts went straight in, no
+placeholder phase.  Order (simplest → richest): Loop printer, Scopes
+& shadowing, Fibonacci, Closures, Classes & inheritance.  Labels may
+still be tuned during verification.
+
+* Done when
+
+All five samples selectable, each runs clean through the visualizer,
+and together they cover: lexer variety, AST shapes, bytecode ops
+(calls, closures, jumps, method dispatch), stack behaviour, console
+output.

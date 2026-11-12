@@ -1,0 +1,131 @@
+#+title: Lexer Panel
+#+date: 2026-06-18
+#+phase: 2b (after 04 — parallel with 06, 07)
+
+Wrap the inline ~displayLex~ logic in a ~LexerPanel extends VisualizationPanel~.
+The lexer panel renders source tokens as ~span.code-item~ elements, writes
+~selectedStart~ to the store on click, and on selection change highlights the
+selected subtree's spans + publishes its primary-span anchor.
+
+* Background
+
+Currently the lexer rendering and interaction live entirely in the demo:
+
+- ~displayLex~ (demo lines ~299–319~) binds ~Lexeme[]~ to spans, sets
+  ~data-start~, colors them, and on click of a meaningful token calls
+  ~this.focusByStart?.(d.start)~ — i.e. it reaches directly into the AST panel.
+- The reverse direction (subtree span highlight + connector) lives in
+  ~onHighlight~ (demo lines ~231–268~): it walks ~collectSubtreeStarts(node)~,
+  styles each matching span, marks the primary span (the one whose
+  ~start === node.start~) with a border, and draws the ~ast-lexer~ connector
+  from the AST rect to that primary span.
+
+The refactor splits these: *click* writes to the store; *subtree highlight +
+anchor* happens in ~onSelectionChange~.
+
+Container: ~#lox-lexer~.  Anchor id: ~'lexer'~.
+
+* Tasks
+
+** DONE Create ~panels/lexer-panel.ts~ scaffold
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/panels/lexer-panel.ts (new)
+   :END:
+
+#+begin_src typescript
+export class LexerPanel extends VisualizationPanel {
+    readonly panelId = 'lexer';
+    onDataChange(data: LoxData) { /* render spans from data.lexemes */ }
+    onSelectionChange(state: VisualizerSelection) { /* highlight + anchor */ }
+}
+#+end_src
+
+The panel needs the color scheme + font weights (today the module-level
+~colors~ and ~weight~ in the demo).  Decide how panels get colors — pass via
+constructor or import a shared ~theme.ts~.  Recommended: a small
+~lox-visualizer/theme.ts~ exporting ~colors~ and ~weight~, imported by every
+panel and the orchestrator (extract from demo lines ~22–38~).  Coordinate this
+extraction with 06/07/08 (whoever lands first creates ~theme.ts~).
+
+** DONE Move ~displayLex~ into ~onDataChange~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/panels/lexer-panel.ts
+   :END:
+
+Port ~displayLex~ (demo 299–319) using ~select(this.container)~.  Keep:
+
+- the ~.join(enter/update/exit)~ span binding with ~class code-item~,
+- ~data-start~ attribute (the connector + matching rely on it),
+- keyword class + per-category color/weight/cursor styling.
+
+Change the click handler: instead of ~this.focusByStart?.(d.start)~, write to
+the store:
+
+#+begin_src typescript
+.on('click', (event, d) => {
+    if (d.category === null) return;     // skip whitespace/non-tokens
+    event.stopPropagation();
+    this.selectionStore.set({ selectedStart: d.start, selectedAstNode: null });
+});
+#+end_src
+
+Writing ~selectedAstNode: null~ lets the AST panel resolve and write back the
+node (see ~00-overview.org~ protocol).
+
+** DONE Implement ~onSelectionChange~ (subtree highlight + primary anchor)
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/panels/lexer-panel.ts
+   :END:
+
+Port the span-highlighting half of ~onHighlight~ (demo 234–263):
+
+1. Clear any previous span styling (port ~clearSpanHighlight~, demo 221–229 —
+   tracks styled spans and resets ~background/border/borderRadius/padding~).
+2. If ~state.selectedStart === null~: clear styling, call
+   ~this.setAnchor(null)~, return.
+3. Determine which spans to light up:
+   - If ~state.selectedAstNode~ is set, use ~collectSubtreeStarts(node)~ (import
+     from ~@/lox-visualizer/ast~) to highlight the whole subtree, bordering the
+     primary span where ~start === selectedAstNode.start~.
+   - Else (no node yet), highlight just the single span with
+     ~data-start === selectedStart~ as the primary.
+4. Find the *primary span* element; if none, clear anchor + return.
+5. ~this.setAnchor(primarySpan.getBoundingClientRect())~ — this feeds the
+   ~ast↔lexer~ line.  The AST panel publishes the ~'ast'~ end; the connector
+   layer draws the line when both are present.
+
+Use ~this.container.querySelector('span[data-start="N"]')~ scoped to the panel's
+container rather than ~document.querySelector('#lox-lexer ...')~.
+
+** DONE Handle clear-on-outside-click via the store
+   :PROPERTIES:
+   :files:    (coordination note for 08)
+   :END:
+
+Today a document-level ~clickOutsideHandler~ (demo 54–58) clears highlights when
+clicking outside ~#lox-ast~/~#lox-compiler~.  In the new model "clear" =
+~store.set({ selectedStart: null, selectedAstNode: null })~, which every panel
+reacts to.  The outside-click listener belongs to the orchestrator (08); the
+lexer panel just needs to correctly clear on a null selection (handled in
+~onSelectionChange~ above).
+
+** DONE Tear-down cleanup
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/panels/lexer-panel.ts
+   :END:
+
+On ~tearDown~ (after ~super.tearDown()~ unsubscribes), reset any span styling so
+re-init starts clean.  The d3 selection's own listeners are replaced on
+re-render via ~.on('click', ...)~, so no manual listener removal is needed for
+the spans.
+
+* Open questions
+
+- *Subtree highlight before node resolves*: between the click (write
+  ~selectedStart~, ~selectedAstNode: null~) and the AST panel's write-back, the
+  lexer shows only the single primary span; once the node arrives it expands to
+  the subtree.  That's a brief two-step flash.  Acceptable?  Alternative: the
+  AST panel resolves synchronously in the *same* tick so subscribers see the
+  node immediately — but ordering of subscribers then matters.  Decide in 06.
+- *Whitespace lexemes*: they get ~data-start~ too but ~category === null~, so
+  clicks are ignored — preserve this.

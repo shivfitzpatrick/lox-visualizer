@@ -1,0 +1,44 @@
+#+TITLE: Project Layout
+#+DATE: 2026-11-12
+
+Standalone Vite + TypeScript app. The visualizer used to live inside a Hugo
+site, which supplied the page, the stylesheet pipeline and the fonts; this repo
+carries its own =index.html= and serves everything it needs from =public/=.
+
+* Directories
+| Directory               | Role                                                                            |
+|-------------------------+---------------------------------------------------------------------------------|
+| src/                    | All TypeScript source; Vite's module graph starts at =src/index.ts=             |
+| src/compiler-viz/       | Language-agnostic visualizer — panels, layout, connectors, playback, theme      |
+| src/lox-visualizer/     | Lox adapter — WASM bridge, event types, state derivation, token map, samples    |
+| src/python-visualizer/  | Second adapter, work in progress; typechecked and tested but not in the bundle  |
+| src/lib/                | Shared primitives — observable store, component base, stylesheet loading        |
+| src/types/              | Ambient declarations and the =lox.js= stub that stands in for the WASM glue     |
+| src/test/               | Test helpers                                                                    |
+| public/                 | Served verbatim at the site root — WASM module, stylesheets, fonts, favicons    |
+| doc/                    | Architecture notes and design docs                                             |
+| doc/log/                | Developer notes — org files and artifacts from debugging sessions                |
+| doc/todo/               | Feature plans, mostly completed; kept as a record of how each piece was built   |
+| dist/                   | Vite build output (gitignored)                                                  |
+
+* Root files
+| File               | Role                                                                           |
+|--------------------+--------------------------------------------------------------------------------|
+| index.html         | The page itself, and the =#viz-lox-container= element the visualizer mounts in  |
+| vite.config.js     | Build + vitest config; also where the WASM glue is marked external             |
+| tsconfig.json      | Solution-style config referencing the two real projects, for tsserver          |
+| tsconfig.app.json  | Source project — =@/*= path alias, strict, no test files                       |
+| tsconfig.test.json | Same, plus vitest globals and the test files                                   |
+| Makefile           | Thin wrapper over the npm scripts, plus the =wasm= target                      |
+
+* Things that are not here
+The WASM module is built from a separate clox checkout — the instrumentation
+that emits the visualizer's events is in that C source. =make wasm
+LOX_PROJECT=/path/to/clox= rebuilds it and copies =lox.js= and =lox.wasm= into
+=public/js/lox-visualizer/=. The built artefacts are committed, so the app runs
+without that checkout.
+
+Older notes under =doc/log/= and =doc/todo/= refer to paths in the Hugo site
+this code was extracted from (=app/src/...=, =static/js/...=, and the
+=goodskynet= repo). They are kept as written; =src/...= and =public/...= are
+the current equivalents.

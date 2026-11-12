@@ -1,0 +1,50 @@
+#+title: Tests and Polish
+#+date: 2026-06-19
+#+phase: 3
+
+Verification after execution parity lands.  Depends on
+[[file:03-execution-orchestrator.org][03-execution-orchestrator]].
+
+* Tasks
+
+** TODO Extend py-data tests
+   :PROPERTIES:
+   :files: app/src/python-visualizer/py-data.test.ts
+   :END:
+
+Add fixture fragment with ~steps~ and ~prints~; assert ~deriveVizData~ still
+works; optionally test type guards for new fields.
+
+** TODO Restore full DEFAULT_LAYOUT on pyvis post
+   :PROPERTIES:
+   :files: content/posts/pyvis.md
+   :END:
+
+If Phase 0 added a slim ~data-layout~ override to hide empty stack/playback,
+remove it once execution works so the post shows the full panel set.
+
+** TODO Browser smoke test
+   :PROPERTIES:
+   :files: (browser)
+   :END:
+
+On ~content/posts/pyvis.md~ and ~content/visualizers.md~ Python tab:
+
+1. Pyodide loads; Run populates panels.
+2. Playback: step forward/back, bytecode arrow, AST highlight.
+3. Console print syncs with scrubber.
+4. SyntaxError clears panels, shows error.
+5. Two visualizers on visualizers page — independent playback state.
+
+** TODO Document stack simulation caveat
+   :PROPERTIES:
+   :files: content/posts/pyvis.md (optional)
+   :END:
+
+Brief note that the stack panel shows a reconstructed evaluation stack, not
+CPython's internal operand stack — if teaching copy warrants it.
+
+* Acceptance
+
+- ~npx vitest run~ passes.
+- Manual checklist in [[file:design.org][design.org]] § Testing checklist complete.

@@ -1,0 +1,130 @@
+#+title: Injectable Token Category Map
+#+date: 2026-06-18
+#+phase: 1c (parallel with 01; independent of 02)
+
+Extract Lox token-type → highlight category mapping into an injectable
+~TokenCategoryMap~ so a future Python adapter can supply its own map without
+importing the Lox ~TokenType~ enum.  ~LexerPanel~ stays dumb: it renders
+~Lexeme.category~ already set on each lexeme.
+
+* Background
+
+~TOKEN_TYPE_MAP~ in ~state/token.ts~ maps clox ~TokenType~ keys to
+~TokenCategory~.  ~LoxState.lex()~ uses it via ~mapToken()~ to fill
+~Lexeme.category~ before data reaches the lexer panel.
+
+The lexer panel imports ~TokenCategory~ for styling rules (~code-keyword~ class,
+clickable cursor) but does *not* import ~TOKEN_TYPE_MAP~ today.  Phase 1
+prepares the *adapter boundary*:
+
+1. Move the Lox map to a dedicated module with a neutral type.
+2. Wire ~LoxState~ / ~mapToken~ through that module.
+3. Export ~LOX_TOKEN_CATEGORY_MAP~ for the Lox orchestrator to pass explicitly
+   when Phase 2 makes the registry shared.
+
+* Target types (~token-map.ts~ — new file)
+
+#+begin_src typescript
+import type { TokenCategory } from '@/lox-visualizer/state/token';
+
+/** Maps a language-specific token type key to a highlight bucket. */
+export type TokenCategoryMap = Record<string, { category: TokenCategory | null }>;
+
+/** Lox/clox token types → shared highlight categories. */
+export const LOX_TOKEN_CATEGORY_MAP: TokenCategoryMap = { /* moved from TOKEN_TYPE_MAP */ };
+#+end_src
+
+~TokenCategory~ enum stays in ~token.ts~ (shared highlight buckets).  ~TokenType~
+enum stays in ~token.ts~ (Lox-specific) but ~TOKEN_TYPE_MAP~ moves out.
+
+* Tasks
+
+** DONE Create ~token-map.ts~ with ~TokenCategoryMap~ and Lox map
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/token-map.ts (new)
+   :END:
+
+- Define ~TokenCategoryMap~ type.
+- Move ~TOKEN_TYPE_MAP~ body to ~LOX_TOKEN_CATEGORY_MAP~ (same entries).
+- In ~token.ts~, re-export ~LOX_TOKEN_CATEGORY_MAP~ as ~TOKEN_TYPE_MAP~ with a
+  ~@deprecated~ comment pointing to ~LOX_TOKEN_CATEGORY_MAP~, *or* delete
+  ~TOKEN_TYPE_MAP~ and update all call sites in this stream.
+
+Prefer updating call sites in one pass (only ~state/state.ts~ uses it today).
+
+** DONE Wire ~mapToken~ through ~LOX_TOKEN_CATEGORY_MAP~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/state/state.ts
+   :END:
+
+#+begin_src typescript
+import { LOX_TOKEN_CATEGORY_MAP } from '@/lox-visualizer/token-map';
+
+function mapToken(lexerEvent: LexerEvent) {
+    const type = mapTokenType(lexerEvent.type);
+    return {
+        type,
+        start: lexerEvent.start,
+        length: lexerEvent.length,
+        ...LOX_TOKEN_CATEGORY_MAP[type],
+    };
+}
+#+end_src
+
+No behavior change to lexeme categories.
+
+** DONE Accept optional map on ~LexerPanel~ (forward-compatible)
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/panels/lexer-panel.ts,
+              app/src/lox-visualizer/layout.ts
+   :END:
+
+Lexer panel already consumes ~Lexeme.category~ from ~VizData~ — it does not
+need the map at render time unless we add token-type-specific rules later.
+
+Minimal forward-compatible wiring:
+
+#+begin_src typescript
+// lexer-panel.ts — store but do not use yet except for documentation
+constructor(
+    container: HTMLElement,
+    dataStore: VizDataStore,
+    selectionStore: Store<VizSelection>,
+    connectors: ConnectorLayer,
+    private tokenMap: TokenCategoryMap = LOX_TOKEN_CATEGORY_MAP,
+) { /* … */ }
+#+end_src
+
+~createPanelRegistry~ passes ~LOX_TOKEN_CATEGORY_MAP~ into ~LexerPanel~.
+Document in a one-line comment that Python registry will pass
+~PYTHON_TOKEN_CATEGORY_MAP~ in Phase 3.
+
+** DONE Unit test for map shape
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/token-map.test.ts (new)
+   :END:
+
+- ~LOX_TOKEN_CATEGORY_MAP~ has an entry for every ~TokenType~ key (~Object.keys(TokenType)~
+  filtered to string keys).
+- Spot-check ~TOKEN_PRINT~ → ~KEYWORD~, ~TOKEN_EOF~ → ~null~ category.
+
+* Dependencies
+
+- None within Phase 1 except the arch-refactor gate.
+- Fully parallel with [[file:01-viz-data-types.org][01-viz-data-types.org]] and
+  [[file:02-instruction-type.org][02-instruction-type.org]].
+
+* Acceptance
+
+- ~state/state.ts~ does not import ~TOKEN_TYPE_MAP~ from ~token.ts~.
+- ~token-map.ts~ is the single home for ~LOX_TOKEN_CATEGORY_MAP~.
+- Lexer highlighting unchanged on cloxvis sample (visual or unit-level category
+  assertions on ~state.lex()~ output).
+- Vitest green.
+
+* Non-goals
+
+- Python ~tokenize.tok_name~ map (Phase 3–4).
+- Moving ~TokenCategory~ enum out of ~token.ts~ (Phase 2 ~compiler-viz~ move).
+- Changing which tokens are clickable in ~LexerPanel~ (~category !== null~ rule
+  stays).

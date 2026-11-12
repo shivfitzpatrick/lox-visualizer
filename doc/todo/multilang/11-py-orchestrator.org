@@ -1,0 +1,224 @@
+#+title: Phase 3c — Python Orchestrator
+#+date: 2026-06-18
+#+phase: 3c (after 09 and 10)
+
+Wire the Python adapter orchestrator (~python-visualizer.ts~).  Phase 3 uses
+a pre-baked fixture JSON instead of Pyodide — clicking Run re-derives the same
+~VizData~ regardless of editor content.  The goal is to prove the shared panels
+mount and the connector layer works for a second language entry.
+
+* Background
+
+The Lox orchestrator (~lox-visualizer.ts~) after task 08:
+- Creates three stores (~data~, ~console~, ~selection~).
+- Calls ~createDefaultPanelRegistry(ctx, LOX_TOKEN_CATEGORY_MAP)~.
+- Wires a WASM instance and posts events to ~LoxState~ on each run.
+
+The Python orchestrator is the same shape but:
+- No WASM — loads the fixture JSON at startup (Phase 4 will swap in Pyodide).
+- Calls ~createDefaultPanelRegistry(ctx, PYTHON_TOKEN_CATEGORY_MAP)~.
+- On each Run: calls ~deriveVizData(fixture)~ and publishes to the data store.
+- ~publishConsoleMessages~ from fixture ~console[]~ field.
+
+* Dependencies
+
+- [[file:09-py-data-layer.org][09]] must be complete: ~deriveVizData~,
+  ~PYTHON_TOKEN_CATEGORY_MAP~, ~PyRawData~, fixture JSON.
+- [[file:10-py-build-post.org][10]] must be complete: Vite entry registered, stub
+  post exists.
+
+* Tasks
+
+** DONE Create ~python-visualizer/python-visualizer.ts~
+   :PROPERTIES:
+   :files: app/src/python-visualizer/python-visualizer.ts
+   :END:
+
+Mirror the structure of ~lox-visualizer.ts~ (post-08), replacing the WASM
+wiring with a fixture loader.
+
+#+begin_src typescript
+import { Component } from '@/lib/component';
+import { setupStyles } from '@/lib/styles';
+import { createStore } from '@/lib/store';
+import { ConnectorLayer } from '@/compiler-viz/connector-layer';
+import type { ConsoleStore, VizData, VizDataStore, VizSelection } from '@/compiler-viz/types';
+import { VisualizationPanel } from '@/compiler-viz/visualization-panel';
+import {
+    createDefaultPanelRegistry,
+    createLayoutChildren,
+    declareConnectors,
+    DEFAULT_LAYOUT,
+    findEntryScript,
+    mountOptionsFromScript,
+} from '@/compiler-viz/layout';
+import type { MountOptions, PanelContext } from '@/compiler-viz/layout';
+import { findCodeAnchor, mountVisualizer } from '@/compiler-viz/mount';
+import { EditorSlot } from '@/compiler-viz/slots/editor-slot';
+import { colors } from '@/compiler-viz/theme';
+import { publishConsoleMessages } from '@/lox-visualizer/lox-data';
+
+import { deriveVizData, PYTHON_TOKEN_CATEGORY_MAP } from '@/python-visualizer/py-data';
+import sampleFixture from '@/python-visualizer/fixtures/sample.json';
+
+// Phase 3 skeleton: always derives from the pre-baked fixture.
+// Phase 4 will replace this with a Pyodide worker call.
+const FIXTURE_DATA = deriveVizData(sampleFixture);
+const FIXTURE_CONSOLE = sampleFixture.console ?? [];
+
+const PYTHON_SCRIPT_FRAGMENT = 'python-visualizer/python-visualizer';
+
+class PythonVisualizer extends Component {
+    private dataStore: VizDataStore;
+    private consoleStore: ConsoleStore;
+    private selection: Store<VizSelection>;
+    private connectors: ConnectorLayer;
+    private panels: VisualizationPanel[];
+    private sampleCode: string;
+
+    private refreshHandler = () => {
+        for (const panel of this.panels) panel.refreshAnchor();
+    };
+
+    private documentClickHandler = () => {
+        this.selection.set({ selectedStart: null, selectedAstNode: null });
+    };
+
+    private constructor(
+        sampleCode: string,
+        dataStore: VizDataStore,
+        consoleStore: ConsoleStore,
+        selection: Store<VizSelection>,
+        connectors: ConnectorLayer,
+        children: Component[],
+    ) {
+        super(children, false);
+        this.sampleCode = sampleCode;
+        this.dataStore = dataStore;
+        this.consoleStore = consoleStore;
+        this.selection = selection;
+        this.connectors = connectors;
+        this.panels = children.filter(
+            (c): c is VisualizationPanel => c instanceof VisualizationPanel,
+        );
+    }
+
+    static fromPage(options: MountOptions = {}): PythonVisualizer | null {
+        const scriptOptions = mountOptionsFromScript(findEntryScript(PYTHON_SCRIPT_FRAGMENT));
+        const layout = options.layout ?? scriptOptions.layout ?? DEFAULT_LAYOUT;
+        const codeSelector = options.codeSelector ?? scriptOptions.codeSelector ?? '.language-python';
+        const anchor = findCodeAnchor(document, codeSelector);
+        if (!anchor) {
+            console.warn('python-visualizer: no sample code block found');
+            return null;
+        }
+
+        const mountResult = mountVisualizer(anchor.pre, layout);
+        const dataStore = createStore<{ data: VizData | null }>({ data: null });
+        const consoleStore = createStore<{ messages: ConsoleMessage[] }>({ messages: [] });
+        const selection = createStore<VizSelection>({ selectedStart: null, selectedAstNode: null });
+        const connectors = new ConnectorLayer(mountResult.root);
+
+        let instance: PythonVisualizer | null = null;
+        const ctx: PanelContext = {
+            dataStore,
+            consoleStore,
+            selectionStore: selection,
+            connectors,
+            root: mountResult.root,
+            initialDoc: mountResult.sampleCode,
+            onRun: () => instance!.run(),
+        };
+
+        declareConnectors(connectors, layout, colors.highlight);
+        const registry = createDefaultPanelRegistry(ctx, PYTHON_TOKEN_CATEGORY_MAP);
+        const children = createLayoutChildren(layout, mountResult.containers, registry);
+
+        instance = new PythonVisualizer(
+            mountResult.sampleCode,
+            dataStore, consoleStore, selection, connectors, children,
+        );
+        return instance;
+    }
+
+    async setUp() {
+        setupStyles('/css/lox-visualizer.css');
+        super.setUp();
+        this.run();
+
+        window.addEventListener('resize', this.refreshHandler);
+        window.addEventListener('scroll', this.refreshHandler);
+        document.addEventListener('click', this.documentClickHandler);
+    }
+
+    tearDown() {
+        super.tearDown();
+        window.removeEventListener('resize', this.refreshHandler);
+        window.removeEventListener('scroll', this.refreshHandler);
+        document.removeEventListener('click', this.documentClickHandler);
+        this.connectors.destroy();
+    }
+
+    run() {
+        // Phase 3: always publish the fixture regardless of editor content.
+        this.selection.set({ selectedStart: null, selectedAstNode: null });
+        this.dataStore.set({ data: FIXTURE_DATA });
+        publishConsoleMessages(this.consoleStore, FIXTURE_CONSOLE);
+    }
+}
+
+const app = PythonVisualizer.fromPage();
+if (app) void app.setUp();
+#+end_src
+
+Note: ~Store~ and ~ConsoleMessage~ need to be imported properly — pull ~Store~
+from ~@/lib/store~ and ~ConsoleMessage~ from ~@/compiler-viz/types~.
+
+** DONE Verify TypeScript compilation
+   :PROPERTIES:
+   :files: app/src/python-visualizer/python-visualizer.ts
+   :END:
+
+Run ~npx tsc --noEmit~ (or ~npx vite build~) and confirm the orchestrator
+compiles clean.  Fix any type errors before marking done.
+
+Common issues to watch for:
+- ~sampleFixture~ needs ~resolveJsonModule: true~ in ~tsconfig.json~ (also
+  needed for 09 tests).
+- ~Store~ type import: pull from ~@/lib/store~, not re-exported from elsewhere.
+- ~ConsoleMessage~ union: the ~'print'~ branch has optional ~srcOffset?~ — the
+  ~publishConsoleMessages~ call passes ~FIXTURE_CONSOLE~ which is typed as
+  ~{ type: 'print' | 'error'; text: string; src_offset?: number }[]~ from the
+  raw JSON.  Widen the type or cast as ~ConsoleMessage[]~.
+
+** TODO Smoke test in browser
+   :PROPERTIES:
+   :files: (browser)
+   :END:
+
+Run ~make serve~ (or ~npx vite~), navigate to the stub Python post, and verify:
+
+1. The visualizer root mounts (the ~.lox-visualizer~ element appears).
+2. Lexer panel shows the fixture tokens colored correctly (~x~ is identifier
+   color, ~=~ is operator, ~1~, ~2~ are literal color).
+3. AST panel renders the Module → Assign → BinOp subtree.
+4. Bytecode panel shows the ~<module>~ chunk with ~LOAD_CONST~, ~STORE_NAME~,
+   etc.
+5. Clicking a lexer token selects the corresponding AST node (the connector
+   line appears).
+6. Run button re-publishes the same fixture (no crash, same data).
+7. Console panel shows any fixture ~console~ entries.
+
+* Acceptance
+
+- ~python-visualizer.ts~ compiles without type errors.
+- Browser smoke test passes (all seven points above).
+- ~vitest run~ still 79/79 (this task adds no new tests; test coverage for the
+  orchestrator is deferred to a later task or manual testing).
+
+* Notes
+
+Depends on [[file:09-py-data-layer.org][09]] (data layer) and [[file:10-py-build-post.org][10]] (Vite entry + post).
+
+After this task, Phase 3 is complete: the shared UI works for a second
+language.  [[file:../../python/design-doc.org][Phase 4]] replaces the fixture with live Pyodide output.

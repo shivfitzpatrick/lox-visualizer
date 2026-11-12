@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lox Compiler Visualizer</title>
+    <meta
+      name="description"
+      content="Interactive views of how Lox source is lexed, parsed, compiled, and executed step by step."
+    />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" href="/favicon-32x32.png" type="image/png" />
+    <!-- Page chrome only. The visualizer injects its own stylesheet
+         (/css/lox-visualizer.css) when it mounts — see lib/styles.ts. -->
+    <link rel="stylesheet" href="/css/page.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="page-header">
+        <h1 class="page-title">Lox Compiler Visualizer</h1>
+        <p class="page-lead">
+          Interactive views of how Lox source is lexed, parsed, compiled, and
+          executed step by step.
+        </p>
+      </header>
+
+      <section class="page-help">
+        <h2>Interacting with the visualization</h2>
+        <ul>
+          <li>Type code into the code editor and click build.</li>
+          <li>
+            Click any lexer token, AST node or bytecode instruction to link them
+            together.
+          </li>
+          <li>
+            Use arrow keys in the AST panel: left/right for siblings, up for
+            parent, down for first child.
+          </li>
+          <li>
+            After a run, scrub or step through execution with the playback bar;
+            the stack panel shows the reconstructed evaluation stack at each
+            step.
+          </li>
+          <li>Click empty space in a panel or outside the visualizer to deselect.</li>
+          <li>Drag inside the AST panel to pan the tree.</li>
+        </ul>
+      </section>
+
+      <p class="page-note">
+        clox — the bytecode VM from <em>Crafting Interpreters</em> — compiled to
+        WebAssembly.
+      </p>
+
+      <!-- index.ts looks this container up by id and mounts into it. -->
+      <div id="viz-lox-container"></div>
+    </main>
+
+    <script type="module" src="/src/index.ts"></script>
+  </body>
+</html>

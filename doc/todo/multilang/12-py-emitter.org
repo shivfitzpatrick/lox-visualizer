@@ -1,0 +1,313 @@
+#+title: Phase 4a — Python Emitter Script
+#+date: 2026-06-18
+#+phase: 4a (parallel with 13; gate for 14)
+
+Write the Python script that runs inside Pyodide and emits ~PyRawData~ JSON.
+This is pure Python — no TypeScript, no browser.  The output schema matches
+~PyRawData~ (defined in ~py-data.ts~) and must reproduce ~fixtures/sample.json~
+for the worked example.
+
+* Background
+
+Phase 3 hard-coded a pre-baked fixture.  Phase 4 replaces it with live output
+from this script, which uses CPython's standard library exclusively:
+
+| Stage    | Module         | Output                  |
+|----------+----------------+-------------------------|
+| Lexer    | ~tokenize~     | ~PyRawLexeme[]~         |
+| AST      | ~ast~          | ~AstNode~ tree          |
+| Bytecode | ~dis~          | ~PyRawInstruction[][]~  |
+
+The script reads source from stdin, runs all three stages, and writes a single
+JSON object to stdout.  Pyodide will call it via ~runPython~ after wiring stdin
+and capturing stdout (see task [[file:13-py-core.org][13]]).
+
+* Target Python version
+
+3.11+ (per-instruction column positions via PEP 657).  Pyodide ships a
+specific CPython version; check that ~inst.positions~ is available at runtime
+and raise a clear error if not.
+
+* Tasks
+
+** TODO Write position normalization helpers
+   :PROPERTIES:
+   :files: app/src/python-visualizer/emitter.py
+   :END:
+
+Create ~app/src/python-visualizer/emitter.py~.
+
+The core primitive is a line-start offset table and a span-to-offset
+flattener:
+
+#+begin_src python
+def line_start_offsets(src: str) -> list[int]:
+    """Absolute UTF-16 offset of the start of each line (1-indexed: index 0 unused)."""
+    offsets = [0, 0]      # offsets[1] = start of line 1 = 0
+    for i, ch in enumerate(src):
+        if ch == '\n':
+            offsets.append(i + 1)
+    return offsets
+
+def to_offset(line_starts: list[int], line: int, col: int) -> int:
+    """Convert 1-indexed (line, col) to absolute UTF-16 offset.
+
+    tokenize col is character-based; ast/dis col_offset is UTF-8-byte-based.
+    For ASCII source (the fixture and most teaching samples) these are equal.
+    For non-ASCII, see doc/python/design-doc.org — defer full UTF-8/UTF-16
+    normalization to a later task.
+    """
+    return line_starts[line] + col
+#+end_src
+
+** TODO Write lexer stage
+   :PROPERTIES:
+   :files: app/src/python-visualizer/emitter.py
+   :END:
+
+Use ~tokenize.generate_tokens~ to produce ~PyRawLexeme~ objects.
+
+#+begin_src python
+import io, keyword, token, tokenize
+
+_PAREN_CHARS = frozenset('()[]')
+_BRACE_CHARS = frozenset('{}')
+
+def _tok_name(t) -> str:
+    """Map a tokenize token to a PyRawLexeme tok_name.
+
+    Three synthetic names override the stdlib tok_name:
+    - 'KEYWORD' for NAME tokens that are Python keywords
+    - 'PAREN'   for OP tokens that are parens/brackets
+    - 'BRACE'   for OP tokens that are braces
+    These match the entries in PYTHON_TOKEN_CATEGORY_MAP in py-data.ts.
+    """
+    if t.exact_type == token.NAME and keyword.iskeyword(t.string):
+        return 'KEYWORD'
+    if t.exact_type == token.OP:
+        if t.string in _PAREN_CHARS:
+            return 'PAREN'
+        if t.string in _BRACE_CHARS:
+            return 'BRACE'
+    return tokenize.tok_name[t.exact_type]
+
+def lex(src: str, line_starts: list[int]) -> list[dict]:
+    lexemes = []
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(src).readline)
+        for t in tokens:
+            if t.exact_type in (token.ENDMARKER, token.ENCODING):
+                continue
+            row, col = t.start
+            end_row, end_col = t.end
+            start = to_offset(line_starts, row, col)
+            length = to_offset(line_starts, end_row, end_col) - start
+            if length <= 0:
+                continue
+            lexemes.append({
+                'tok_name': _tok_name(t),
+                'text': t.string,
+                'start': start,
+                'length': length,
+            })
+    except tokenize.TokenError:
+        pass  # incomplete source — return what we have
+    return lexemes
+#+end_src
+
+** TODO Write AST stage
+   :PROPERTIES:
+   :files: app/src/python-visualizer/emitter.py
+   :END:
+
+Recursively convert an ~ast.AST~ node to the shared ~AstNode~ JSON shape:
+
+#+begin_src python
+import ast as _ast
+
+def ast_to_node(node: _ast.AST, line_starts: list[int], child_type: str | None = None) -> dict:
+    start = None
+    if hasattr(node, 'lineno') and node.lineno is not None:
+        start = to_offset(line_starts, node.lineno, node.col_offset)
+
+    attrs = {}
+    children = []
+
+    for field, value in _ast.iter_fields(node):
+        # Scalar values become attrs; AST children become children nodes.
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, _ast.AST):
+                    children.append(ast_to_node(item, line_starts, field.title()))
+        elif isinstance(value, _ast.AST):
+            children.append(ast_to_node(value, line_starts, field.title()))
+        elif isinstance(value, (int, float, bool, str, bytes, type(None))):
+            if value is not None and not isinstance(value, _ast.AST):
+                attrs[field] = str(value)
+
+    return {
+        'type': type(node).__name__,
+        'childType': child_type,
+        'start': start,
+        'attrs': attrs,
+        'children': children,
+    }
+#+end_src
+
+Call with ~_ast.parse(src)~.
+
+** TODO Write bytecode stage with span resolution
+   :PROPERTIES:
+   :files: app/src/python-visualizer/emitter.py
+   :END:
+
+Collect instructions from all code objects (recursing into nested ones for
+functions, comprehensions, classes).  For each instruction, resolve its source
+span to the start offset of the *smallest enclosing AST node* — this is the
+key that the connector layer uses to link bytecode rows to AST nodes.
+
+#+begin_src python
+import dis, types
+
+def _smallest_enclosing_start(
+    abs_start: int,
+    abs_end: int,
+    ast_root: dict,
+) -> int | None:
+    """Walk the AstNode tree (already serialized as dict) and return the
+    start offset of the smallest node whose span contains [abs_start, abs_end).
+    Falls back to abs_start if no node is found.
+    """
+    best: dict | None = None
+    best_size = float('inf')
+
+    # We need end offsets, but AstNode doesn't store them.
+    # Instead, find the deepest node whose start <= abs_start.
+    # This is a reasonable heuristic when end offsets aren't stored.
+    def walk(node: dict) -> None:
+        nonlocal best, best_size
+        s = node.get('start')
+        if s is not None and s <= abs_start:
+            size = abs_start - s   # smaller gap = better enclosing candidate
+            if size < best_size:
+                best_size = size
+                best = node
+        for child in node.get('children', []):
+            walk(child)
+
+    walk(ast_root)
+    return best['start'] if best is not None else abs_start
+
+def collect_chunks(
+    code_obj: types.CodeType,
+    line_starts: list[int],
+    ast_root: dict,
+    chunks: dict | None = None,
+) -> dict:
+    if chunks is None:
+        chunks = {}
+
+    name = getattr(code_obj, 'co_qualname', code_obj.co_name)
+    instrs = []
+
+    for inst in dis.get_instructions(code_obj, adaptive=False):
+        entry: dict = {'offset': inst.offset, 'op': inst.opname}
+        if inst.arg is not None:
+            entry['arg'] = inst.arg
+        if inst.argrepr:
+            entry['constant'] = inst.argrepr
+
+        pos = inst.positions  # None on Python < 3.11 or synthetic instructions
+        if pos is not None and pos.lineno is not None and pos.col_offset is not None:
+            abs_start = to_offset(line_starts, pos.lineno, pos.col_offset)
+            abs_end = (
+                to_offset(line_starts, pos.end_lineno, pos.end_col_offset)
+                if pos.end_lineno is not None and pos.end_col_offset is not None
+                else abs_start + 1
+            )
+            resolved = _smallest_enclosing_start(abs_start, abs_end, ast_root)
+            entry['src_start'] = resolved if resolved is not None else abs_start
+
+        instrs.append(entry)
+
+    chunks[name] = instrs
+
+    for const in code_obj.co_consts:
+        if isinstance(const, types.CodeType):
+            collect_chunks(const, line_starts, ast_root, chunks)
+
+    return chunks
+#+end_src
+
+** TODO Write main entry point
+   :PROPERTIES:
+   :files: app/src/python-visualizer/emitter.py
+   :END:
+
+Read source from stdin, run all three stages, print JSON:
+
+#+begin_src python
+import json, sys
+
+def run(src: str) -> dict:
+    line_starts = line_start_offsets(src)
+    lexemes = lex(src, line_starts)
+    try:
+        tree = _ast.parse(src)
+        ast_root = ast_to_node(tree, line_starts)
+    except SyntaxError as e:
+        return {'error': str(e), 'source': src}
+
+    code_obj = compile(src, '<viz>', 'exec')
+    chunks = collect_chunks(code_obj, line_starts, ast_root)
+
+    return {
+        'source': src,
+        'lexemes': lexemes,
+        'ast': ast_root,
+        'chunks': chunks,
+    }
+
+if __name__ == '__main__':
+    src = sys.stdin.read()
+    print(json.dumps(run(src)))
+#+end_src
+
+** TODO Validate against fixture
+   :PROPERTIES:
+   :files: app/src/python-visualizer/emitter.py
+   :END:
+
+Run locally and compare output to ~fixtures/sample.json~:
+
+#+begin_src sh
+echo 'x = 1 + 2\nprint(x)' | python app/src/python-visualizer/emitter.py | python -m json.tool
+#+end_src
+
+Key things to verify:
+- 9 lexemes present with correct ~start~/~length~ values.
+- ~ast~ root is type ~Module~ with two children (~Assign~, ~Expr~).
+- ~chunks~ has key ~<module>~ with ~LOAD_CONST~ instruction at ~src_start: 4~
+  (the constant-folded ~1 + 2~).
+- ~STORE_NAME~ has ~src_start: 0~.
+- ~LOAD_NAME~ for ~print~ has ~src_start: 11~.
+
+The output won't match the fixture byte-for-byte (opcodes differ between Python
+versions), but the ~src_start~ values and AST shape should match.
+
+* Acceptance
+
+- ~python emitter.py < sample_input.txt~ produces valid ~PyRawData~ JSON.
+- Lexemes cover the sample source with the correct category overrides (KEYWORD,
+  PAREN, BRACE for the appropriate tokens).
+- AST root is ~Module~ with ~Assign~ and ~Expr~ children.
+- ~<module>~ chunk present; ~LOAD_CONST~ at ~src_start: 4~; ~src_start~ absent
+  for instructions where ~positions is None~.
+- Works in Python 3.11+ (test with the version Pyodide ships).
+
+* Notes
+
+Parallel with [[file:13-py-core.org][13]].  Task [[file:13-py-core.org][13]] imports this file as a string via
+~import emitterScript from './emitter.py?raw'~.  The script does not need to
+be importable as a Python module — it only runs as a subprocess / Pyodide
+~runPython~ call.

@@ -1,0 +1,192 @@
+#+title: C — vm_step Event
+#+date: 2026-06-18
+#+phase: 1 (parallel with 02)
+
+Add a =vm_step= JSON event emitted after each instruction dispatch in the clox
+VM.  This is the only C-side change required for the execution visualization.
+
+The clox source lives at =~/Code/learn/cs/crafting-interpreters/clox= (outside
+this repo).  After editing, run =make wasm= from the goodskynet root to rebuild
+and copy the WASM binary into place.
+
+* Background
+
+The existing compiler events (=lexer=, =parser=, =compiler=) are emitted during
+compilation via printf to stdout, then parsed by the frontend as JSON.  The
+=vm_step= event follows the same convention.
+
+The event is emitted *after* each instruction executes, while the VM's =ip=
+already points to the *next* instruction.  The snapshot therefore reflects the
+stack after the instruction ran — the result, not the input.  This is the
+natural emission point and matches how a debugger shows "current state".
+
+* Tasks
+
+** DONE Implement =printValueJson=
+   :PROPERTIES:
+   :files:    clox/src/debug.c (or vm.c — wherever is cleanest)
+   :END:
+
+Write a helper that serializes a single Lox =Value= to a JSON fragment on
+stdout.  No trailing newline; the caller wraps it in an array.
+
+Serialization table (use short =t= key to keep stdout volume low):
+
+| Lox value                | JSON output                                          |
+|--------------------------+------------------------------------------------------|
+| VAL_NIL                  | ={ "t": "nil" }=                                     |
+| VAL_BOOL true            | ={ "t": "bool", "v": true }=                         |
+| VAL_BOOL false           | ={ "t": "bool", "v": false }=                        |
+| VAL_NUMBER               | ={ "t": "num", "v": <double> }=                      |
+| OBJ_STRING               | ={ "t": "str", "v": "<escaped text>" }=              |
+| OBJ_CLOSURE / OBJ_FUNCTION | ={ "t": "fn", "name": "<name or \"\">", "arity": N }= |
+| OBJ_NATIVE               | ={ "t": "native", "name": "<name>" }=                |
+| OBJ_CLASS                | ={ "t": "class", "name": "<name>" }=                 |
+| OBJ_INSTANCE             | ={ "t": "inst", "class": "<className>" }=            |
+| OBJ_BOUND_METHOD         | ={ "t": "method", "name": "<methodName>" }=          |
+| OBJ_UPVALUE              | ={ "t": "upval" }=                                   |
+
+For strings, escape at minimum =\= and ="= so the JSON is valid.  Truncate
+displayed value to 64 chars to bound line length; the full string is not needed
+for visualization.
+
+#+begin_src c
+static void printValueJson(Value value) {
+    if (IS_NIL(value))  { printf("{\"t\":\"nil\"}"); return; }
+    if (IS_BOOL(value)) { printf("{\"t\":\"bool\",\"v\":%s}", AS_BOOL(value) ? "true" : "false"); return; }
+    if (IS_NUMBER(value)) { printf("{\"t\":\"num\",\"v\":%.14g}", AS_NUMBER(value)); return; }
+
+    ObjType type = OBJ_TYPE(value);
+    switch (type) {
+        case OBJ_STRING: {
+            ObjString* s = AS_STRING(value);
+            // TODO: escape quotes and backslashes
+            printf("{\"t\":\"str\",\"v\":\"%.*s\"}", s->length > 64 ? 64 : s->length, s->chars);
+            break;
+        }
+        case OBJ_CLOSURE:
+        case OBJ_FUNCTION: {
+            ObjFunction* fn = type == OBJ_CLOSURE
+                ? AS_CLOSURE(value)->function : AS_FUNCTION(value);
+            const char* name = fn->name ? fn->name->chars : "";
+            printf("{\"t\":\"fn\",\"name\":\"%s\",\"arity\":%d}", name, fn->arity);
+            break;
+        }
+        case OBJ_NATIVE: {
+            // native functions don't carry a name in clox; use a fixed label
+            printf("{\"t\":\"native\"}");
+            break;
+        }
+        case OBJ_CLASS: {
+            ObjClass* klass = AS_CLASS(value);
+            printf("{\"t\":\"class\",\"name\":\"%s\"}", klass->name->chars);
+            break;
+        }
+        case OBJ_INSTANCE: {
+            ObjInstance* inst = AS_INSTANCE(value);
+            printf("{\"t\":\"inst\",\"class\":\"%s\"}", inst->klass->name->chars);
+            break;
+        }
+        case OBJ_BOUND_METHOD: {
+            ObjBoundMethod* bm = AS_BOUND_METHOD(value);
+            const char* name = bm->method->function->name
+                ? bm->method->function->name->chars : "";
+            printf("{\"t\":\"method\",\"name\":\"%s\"}", name);
+            break;
+        }
+        case OBJ_UPVALUE:
+            printf("{\"t\":\"upval\"}");
+            break;
+        default:
+            printf("{\"t\":\"unknown\"}");
+            break;
+    }
+}
+#+end_src
+
+** DONE Implement =emitVmStep=
+   :PROPERTIES:
+   :files:    clox/src/vm.c
+   :END:
+
+Add a static helper that emits the full =vm_step= event.  Parameters: the =VM*=
+and the integer offset of the instruction that *just ran* (capture =ip - chunk->code - 1=
+after each dispatch, or restructure to capture before advancing =ip=).
+
+#+begin_src c
+static void emitVmStep(VM* vm, ObjFunction* fn, int instrOffset) {
+    printf("{\"msg_type\":\"vm_step\",\"chunk\":\"%s\",\"offset\":%d,\"stack\":[",
+           fn->name ? fn->name->chars : "script", instrOffset);
+
+    for (Value* slot = vm->stack; slot < vm->stackTop; slot++) {
+        if (slot != vm->stack) printf(",");
+        printValueJson(*slot);
+    }
+
+    printf("],\"frames\":[");
+    for (int i = 0; i < vm->frameCount; i++) {
+        CallFrame* f = &vm->frames[i];
+        int base = (int)(f->slots - vm->stack);
+        const char* name = f->closure->function->name
+            ? f->closure->function->name->chars : "script";
+        if (i > 0) printf(",");
+        printf("{\"fn\":\"%s\",\"base\":%d}", name, base);
+    }
+    printf("]}\n");
+    fflush(stdout);
+}
+#+end_src
+
+** DONE Call =emitVmStep= in the dispatch loop
+   :PROPERTIES:
+   :files:    clox/src/vm.c
+   :END:
+
+In =run()= (clox's main interpreter loop), call =emitVmStep= after each
+instruction completes — ideally as a macro or a consistent insertion point so
+every opcode is covered automatically.
+
+One approach: capture the offset before dispatch, then call after:
+
+#+begin_src c
+// At the top of the main loop, before DISPATCH():
+int instrOffset = (int)(ip - frame->closure->function->chunk.code);
+
+// ... dispatch and execute instruction ...
+
+// At the bottom of each case before the next LOOP() / DISPATCH():
+emitVmStep(vm, frame->closure->function, instrOffset);
+#+end_src
+
+If clox uses a computed-goto dispatch loop (~DISPATCH_TABLE~ / ~DISPATCH~ macro),
+a cleaner pattern is to insert the emit call into the =LOOP= macro itself.
+
+Verify: run a trivial Lox program (=print 1 + 2;=) and check that =vm_step=
+lines appear on stdout, are valid JSON, and the stack values look correct.
+
+** DONE Rebuild WASM and verify
+   :PROPERTIES:
+   :files:    static/js/lox-visualizer/lox.js, static/js/lox-visualizer/lox.wasm
+   :END:
+
+From the goodskynet project root:
+
+#+begin_src sh
+make wasm
+#+end_src
+
+Then run the Hugo dev server and open the cloxvis post.  Open the browser console
+and confirm =vm_step= events are printed to stdout (they will also appear in the
+frontend console if the =stdout= handler logs them).
+
+* Open questions
+
+- *OBJ_NATIVE name*: clox does not store a name string on =ObjNative= by default.
+  Options: (a) emit ={"t":"native"}= with no name, (b) add a =name= field to
+  =ObjNative= and fill it when registering builtins.  Option (a) is sufficient
+  for now.
+- *String escaping*: the minimal approach escapes only ="= and =\=.  If Lox
+  strings can contain control characters, add escaping for =\n=, =\t=, etc.
+- *Step gate*: if programs loop for a long time, stdout becomes enormous.  A
+  configurable cap (e.g. emit only the first 10 000 steps) can be added as a
+  follow-up (see 06-polish).

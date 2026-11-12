@@ -1,0 +1,199 @@
+#+title: Phase 4b — Pyodide Loader (py-core.ts)
+#+date: 2026-06-18
+#+phase: 4b (parallel with 12; gate for 14)
+
+Create ~py-core.ts~: the TypeScript module that bootstraps Pyodide, injects
+the emitter script, and exposes a ~run(source)~ function that returns
+~PyRawData~.  No DOM changes — this is a pure async data module.
+
+* Background
+
+Pyodide is CPython compiled to WebAssembly.  It exposes ~loadPyodide()~ and
+~runPython()~.  The emitter script (task [[file:12-py-emitter.org][12]]) lives in
+~emitter.py~; Vite's ~?raw~ suffix imports it as a plain string, which
+~runPython~ executes inside the Pyodide interpreter.
+
+The loader must handle:
+- Pyodide's one-time ~6 MB download (~loadPyodide~ is called once and cached).
+- Python ~SyntaxError~ and runtime exceptions — returned as a structured error,
+  not thrown, so the orchestrator can push them to ~consoleStore~.
+- The emitter outputting ~{"error": "..."}~ for compile errors — map those to a
+  ~ConsoleMessage~.
+
+* Tasks
+
+** TODO Add Pyodide type declaration
+   :PROPERTIES:
+   :files: app/src/types/pyodide.d.ts, tsconfig.json
+   :END:
+
+Pyodide ships its own types as ~pyodide~.  For a CDN dynamic import we only
+need a minimal ambient declaration.  Create
+~app/src/types/pyodide.d.ts~:
+
+#+begin_src typescript
+declare module 'https://cdn.jsdelivr.net/pyodide/v0.28.0/full/pyodide.js' {
+    export interface PyodideInterface {
+        runPython(code: string): unknown;
+        globals: { get(name: string): unknown; set(name: string, value: unknown): void };
+    }
+    export function loadPyodide(options?: { indexURL?: string }): Promise<PyodideInterface>;
+}
+#+end_src
+
+Also add a ~?raw~ declaration alongside it so TypeScript accepts the Python
+file import:
+
+#+begin_src typescript
+// In app/src/types/pyodide.d.ts (append)
+declare module '*.py?raw' {
+    const src: string;
+    export default src;
+}
+#+end_src
+
+Check whether ~app/src/types/pyodide.d.ts~ is picked up by tsconfig
+(the existing ~"include": ["app/src/**/*"]~ should cover it).
+
+Pin the Pyodide version in the CDN URL.  Check the latest stable at
+[[https://pyodide.org]] and use that version consistently in both ~py-core.ts~
+and any ~<script>~ preloads in the stub post.  Version 0.28.0 is used as a
+placeholder here — verify and update.
+
+** TODO Implement ~py-core.ts~
+   :PROPERTIES:
+   :files: app/src/python-visualizer/py-core.ts
+   :END:
+
+#+begin_src typescript
+import type { PyRawData } from '@/python-visualizer/py-data';
+import emitterScript from './emitter.py?raw';
+
+const PYODIDE_URL = 'https://cdn.jsdelivr.net/pyodide/v0.28.0/full/pyodide.js';
+
+export type PyRunResult =
+    | { ok: true; data: PyRawData }
+    | { ok: false; error: string };
+
+export interface PyCore {
+    run(source: string): PyRunResult;
+}
+
+let cached: Promise<PyCore> | null = null;
+
+export function loadPyCore(): Promise<PyCore> {
+    if (cached) return cached;
+
+    cached = (async () => {
+        const { loadPyodide } = await import(/* @vite-ignore */ PYODIDE_URL);
+        const py = await loadPyodide();
+
+        // Inject the emitter into the interpreter once.
+        py.runPython(emitterScript);
+
+        return {
+            run(source: string): PyRunResult {
+                try {
+                    py.globals.set('_viz_src', source);
+                    const raw = py.runPython(
+                        'import json; json.dumps(run(_viz_src))',
+                    );
+                    const parsed = JSON.parse(raw as string) as PyRawData | { error: string };
+                    if ('error' in parsed) {
+                        return { ok: false, error: parsed.error };
+                    }
+                    return { ok: true, data: parsed };
+                } catch (e) {
+                    return { ok: false, error: String(e) };
+                }
+            },
+        };
+    })();
+
+    return cached;
+}
+#+end_src
+
+Notes:
+- ~/* @vite-ignore */~ suppresses Vite's static import analysis warning for
+  the CDN URL.  The string is a runtime dynamic import, not bundled.
+- ~cached~ ensures Pyodide loads only once regardless of how many times
+  ~loadPyCore()~ is called.
+- The emitter's ~run()~ function is defined in module scope by ~runPython(emitterScript)~,
+  so subsequent calls via ~_viz_src~ work without re-injecting the script.
+
+** TODO Add Pyodide CDN to vite.config.js external list
+   :PROPERTIES:
+   :files: vite.config.js
+   :END:
+
+The CDN URL is a runtime dynamic import — Vite must not attempt to bundle or
+resolve it.  Add it to the ~external~ array:
+
+#+begin_src javascript
+external: [
+    '/js/lox-visualizer/lox.js',
+    /^https:\/\/cdn\.jsdelivr\.net\/pyodide\//,
+],
+#+end_src
+
+The regex matches any Pyodide CDN URL regardless of version path, so it
+survives version bumps without config changes.
+
+** TODO Write a unit test for the module boundary
+   :PROPERTIES:
+   :files: app/src/python-visualizer/py-core.test.ts
+   :END:
+
+Pyodide doesn't run in vitest's Node environment, so test only the module
+interface and the error-path logic without actually loading Pyodide:
+
+#+begin_src typescript
+import { assert } from 'chai';
+import type { PyRunResult } from '@/python-visualizer/py-core';
+
+describe('PyRunResult type', () => {
+    it('ok branch carries PyRawData', () => {
+        const r: PyRunResult = {
+            ok: true,
+            data: {
+                source: 'x = 1',
+                lexemes: [],
+                ast: { type: 'Module', childType: null, start: 0, attrs: {}, children: [] },
+                chunks: {},
+            },
+        };
+        assert.isTrue(r.ok);
+        if (r.ok) assert.equal(r.data.source, 'x = 1');
+    });
+
+    it('error branch carries a message string', () => {
+        const r: PyRunResult = { ok: false, error: 'SyntaxError: bad input' };
+        assert.isFalse(r.ok);
+        if (!r.ok) assert.include(r.error, 'SyntaxError');
+    });
+});
+#+end_src
+
+This just type-checks the discriminated union — no Pyodide needed.
+
+* Acceptance
+
+- ~py-core.ts~ compiles without type errors (~npx vite build~ clean).
+- The unit tests pass (~vitest run~, no new failures).
+- ~loadPyCore()~ returns a singleton: two calls share one Pyodide instance
+  (verify by inspection — no runtime test needed).
+- The CDN URL is marked external in ~vite.config.js~; the Pyodide JS is *not*
+  included in the bundle output.
+
+* Notes
+
+Parallel with [[file:12-py-emitter.org][12]] (the Python emitter).  The ~import emitter from
+'./emitter.py?raw'~ line references a file that [[file:12-py-emitter.org][12]] creates; if building
+in a worktree without that file, create a placeholder:
+~echo '# placeholder' > app/src/python-visualizer/emitter.py~.
+
+Gate for [[file:14-py-runtime-wiring.org][14]].
+
+The Pyodide version pinned in ~PYODIDE_URL~ and in the CDN declaration must
+match.  Verify the version is available at CDN before pinning.

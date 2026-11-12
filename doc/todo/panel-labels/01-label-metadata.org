@@ -1,0 +1,67 @@
+#+title: Panel Label Metadata
+#+date: 2026-06-19
+#+phase: 1 (no inter-dependencies)
+
+Define the canonical display string for each ~PanelKind~.  Pure TypeScript — no
+DOM changes yet.
+
+* Background
+
+~PanelKind~ names are internal identifiers (~ast~, ~console~).  Labels shown to
+the reader should use familiar compiler-pipeline vocabulary: "Parser" not "AST",
+"Output" not "Console", "Source" not "Editor".
+
+Centralizing strings in ~layout.ts~ keeps Lox, Python, tests, and future mobile
+pane-switcher tabs in sync.
+
+* Tasks
+
+** DONE Add ~PANEL_LABELS~ map and ~panelLabel()~ helper
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/layout.ts
+   :END:
+
+Add next to ~panelClass~ / ~panelShellId~:
+
+#+begin_src typescript
+export const PANEL_LABELS: Readonly<Record<PanelKind, string>> = {
+    editor: 'Source',
+    lexer: 'Lexer',
+    ast: 'Parser',
+    bytecode: 'Bytecode',
+    stack: 'Stack',
+    console: 'Output',
+    playback: 'Playback',
+};
+
+export function panelLabel(kind: PanelKind): string {
+    return PANEL_LABELS[kind];
+}
+#+end_src
+
+Use ~Readonly<Record<…>>~ so every ~PanelKind~ must have an entry — the compiler
+catches a missing label when a new kind is added.
+
+** DONE Unit-test ~panelLabel()~
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/layout.test.ts
+   :END:
+
+Add a small table-driven test:
+
+#+begin_src typescript
+it('panelLabel returns display strings', () => {
+    assert.equal(panelLabel('editor'), 'Source');
+    assert.equal(panelLabel('ast'), 'Parser');
+    assert.equal(panelLabel('console'), 'Output');
+});
+#+end_src
+
+No need to assert every kind individually if one loop over ~PANEL_LABELS~
+entries suffices.
+
+* Acceptance
+
+- ~panelLabel~ is exported from ~layout.ts~.
+- Every ~PanelKind~ has a non-empty label in ~PANEL_LABELS~.
+- Tests pass: ~npm test -- layout.test~.

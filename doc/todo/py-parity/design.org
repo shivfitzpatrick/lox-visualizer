@@ -1,0 +1,349 @@
+#+title: Python Visualizer — Lox Parity Design
+#+date: 2026-06-19
+
+Design for bringing the Python visualizer up to parity with recent Lox
+visualizer improvements.  The Lox side gained execution playback (stack panel,
+bytecode arrow, scrubber controls, console sync), panel labels, and a growing set
+of shared ~compiler-viz~ shell improvements (mobile layout, desktop grid, AST
+touch nav).  This doc inventories what already applies to Python, what needs
+Python-specific adapter work, and what arrives automatically from shared
+infrastructure.
+
+Phased task files: [[file:00-overview.org][00-overview.org]].
+
+* Goal end-state
+
+The Python post on ~content/posts/pyvis.md~ and the Python tab on
+~content/visualizers.md~ offer the same *interaction model* as the Lox post:
+
+1. Edit source, click Run.
+2. Lexer, AST, and bytecode panels populate from live Pyodide output (done).
+3. After a successful run, execution playback is available: step through
+   instructions, see the bytecode ► arrow, AST highlight, and (reconstructed)
+   evaluation-stack contents.
+4. Console output appears in sync with playback (prints gated by step).
+5. Shared shell improvements (panel labels, responsive layout) work without
+   Python-specific code.
+
+Python will *not* replicate Lox's operand stack byte-for-byte — CPython does not
+expose the real evaluation stack to pure Python.  We show a
+~dis.stack_effect~-based reconstruction instead (see [[doc:../../python/design-doc.org][doc/python/design-doc.org]] § execution tracing).
+
+* Current state comparison
+
+** Lox visualizer (recent improvements)
+
+| Area | What changed |
+|------+--------------|
+| Execution | C VM emits ~vm_step~ JSON after each dispatch; orchestrator buffers steps + tagged prints |
+| Stack panel | New ~StackPanel~ — frame boundaries, typed value rows |
+| Bytecode panel | ► ~bc-executing~ row during playback; opens collapsed ~<details>~ |
+| AST panel | ~ast-executing~ highlight + ~bc-exec↔ast-exec~ connector during playback |
+| Playback | ~PlaybackControls~ — step, scrub, auto-play, counter |
+| Console | Prints move to ~ExecutionStore.prints~; gated by ~currentStep~; errors stay in ~ConsoleStore~ |
+| Layout | ~DEFAULT_LAYOUT~ adds ~playback~ row and ~bytecode|stack~ side-by-side |
+| Connectors | ~bc-exec~ line added when bytecode + AST both present |
+| Shell | Panel labels (~.lox-panel-label~), pane wrappers (~.lox-pane~), AST chrome on shell |
+| Safety | ~MAX_STEPS = 10_000~ cap with console warning |
+
+** Python visualizer (today)
+
+| Area | Status |
+|------+--------|
+| Static stages | ~emitter.py~ → tokenize / ~ast.parse~ / ~dis~ → ~PyRawData~ JSON (Pyodide) |
+| Orchestrator | ~python-visualizer.ts~ — thin adapter; ~loadPyCore~ + ~deriveVizData~ |
+| Execution | *Not implemented.* ~executionStore~ is created and passed to panels but never populated |
+| Stack / playback | Panels mount (via ~DEFAULT_LAYOUT~) but stay empty — no steps |
+| Console | All prints pushed to ~ConsoleStore~ at once; ~PyRawData.console~ field exists but emitter never fills it |
+| Connectors | ast↔lexer, ast↔bc, console↔bc — working for static compile view |
+| bc-exec connector | *Missing* — Lox adds ~connectors.addLine('bc-exec', 'ast-exec')~; Python does not |
+| ExecutionStore field | Created in ~fromPage~ but not stored on ~PythonVisualizer~ instance |
+| Program execution | Emitter compiles and disassembles only; source is never ~exec~'d |
+
+* What already applies (no Python work)
+
+These improvements live in ~app/src/compiler-viz/~ or ~mount.ts~.  Python inherits
+them by using the same mount path and panel registry.
+
+** Panel labels and pane wrappers
+
+~buildLayoutDOM~ in ~mount.ts~ wraps each panel in ~.lox-pane~ and inserts
+~.lox-panel-label~ from ~panelLabel(kind)~.  Both visualizers call
+~mountVisualizer~ — labels appear automatically.
+
+** Shared panels and stores
+
+~createDefaultPanelRegistry~ wires the same ~LexerPanel~, ~AstPanel~,
+~BytecodePanel~, ~ConsolePanel~, ~StackPanel~, and ~PlaybackControls~ for every
+language.  ~PanelContext~ already includes ~executionStore~.
+
+** Execution-aware panel behavior (dormant until steps exist)
+
+- ~BytecodePanel~ and ~AstPanel~ subscribe to ~executionStore~ and call
+  ~setExecuting~ / ~applyExecHighlight~ when ~steps.length > 0~.
+- ~ConsolePanel~ accepts optional ~executionStore~; when steps exist, renders
+  errors + step-gated prints; otherwise falls back to ~consoleStore~ (Python's
+  current path).
+- ~PlaybackControls~ and ~StackPanel~ render empty/disabled until steps arrive.
+
+** Static cross-panel linking
+
+Token → AST → bytecode connectors work today.  Python emitter already attaches
+~src_start~ per instruction via PEP 657 positions and
+~_smallest_enclosing_start~ for optimizer-tolerant AST linking.
+
+** CSS and layout structure
+
+~DEFAULT_LAYOUT~ includes playback and stack rows.  Playback/stack/console CSS
+(~bc-executing~, ~ast-executing~, ~.playback-controls~) is in
+~static/css/lox-visualizer.css~ — shared by both posts.
+
+* Quick wins (orchestrator-only)
+
+Small diffs in ~python-visualizer.ts~; no emitter changes.
+
+** Add bc-exec connector
+
+Mirror Lox:
+
+#+begin_src typescript
+declareConnectors(connectors, layout, colors.highlight);
+if (layoutIncludes(layout, 'bytecode') && layoutIncludes(layout, 'ast')) {
+    connectors.addLine('bc-exec', 'ast-exec', '#f90');
+}
+#+end_src
+
+This enables the AST execution highlight connector once steps are populated.
+No effect until execution lands.
+
+** Store executionStore on the orchestrator
+
+~fromPage~ creates ~executionStore~ but the constructor does not retain it.
+Hold ~private executionStore: ExecutionStore~ and reset it in ~run()~ alongside
+selection, matching Lox's ~rerun~ hygiene:
+
+#+begin_src typescript
+this.executionStore.set({ steps: [], prints: [], currentStep: null, playing: false });
+#+end_src
+
+** Optional: slimmer layout until execution works
+
+The pyvis post can hide empty playback/stack rows via ~data-layout~ on the
+script tag:
+
+#+begin_example
+data-layout="editor,lexer|ast|bytecode|console"
+#+end_example
+
+Remove this override once execution playback is wired — the full
+~DEFAULT_LAYOUT~ is the target.
+
+* Execution parity (Python adapter work)
+
+This is the main gap.  Reuse the shared ~ExecutionStore~ / ~VmStep~ shape where
+possible; extend only where Python semantics differ.
+
+** Reference: Lox event flow
+
+#+begin_example
+runSource(code)
+  → stdout JSON lines interleaved:
+      {"msg_type":"print", ...}        ← during OP_PRINT
+      {"msg_type":"vm_step", ...}      ← after each dispatch
+  → orchestrator buffers steps + prints (stamped with stepCount)
+  → executionStore.set({ steps, prints, currentStep: 0 })
+#+end_example
+
+** Python equivalent: sys.monitoring INSTRUCTION events
+
+CPython 3.12+ (~sys.monitoring~, PEP 669) fires a callback per executed
+instruction with ~(code, instruction_offset)~.  Under Pyodide this is the same
+interpreter — no WASM boundary issue for monitoring (see
+~doc/python/design-doc.org~).
+
+Extend ~emitter.py~ ~run()~:
+
+1. After ~compile()~, build a ~pos_by_off~ map from ~dis.get_instructions~ (already done for static bytecode).
+2. Register an ~INSTRUCTION~ monitoring callback for the top-level code object (and nested code objects if stepping into calls).
+3. Redirect ~sys.stdout~ (or use a custom ~print~ hook) to capture print output with source position where available.
+4. During ~exec(code, {})~, append step records and print records to lists.
+5. Return them in ~PyRawData~:
+
+#+begin_src python
+{
+    "source": src,
+    "lexemes": [...],
+    "ast": {...},
+    "chunks": {...},
+    "steps": [                          # new — same shape as VmStep
+        {
+            "msg_type": "vm_step",
+            "chunk": "<module>",
+            "offset": 6,
+            "stack": [...],             # reconstructed, see below
+            "frames": [...],
+        },
+        ...
+    ],
+    "prints": [                         # new — TaggedPrint-compatible
+        {"text": "3", "stepIndex": 4, "src_offset": 10, "chunk": "<module>", "offset": 12},
+    ],
+}
+#+end_src
+
+** Fallback for Pyodide Python < 3.12
+
+If the bundled interpreter lacks ~sys.monitoring~, fall back to
+~sys.settrace~ with ~frame.f_trace_opcodes = True~ and read ~frame.f_lasti~.
+Gate on version at emitter startup; document minimum Pyodide version in
+~py-core.ts~.
+
+** Stack contents: reconstruction, not introspection
+
+Lox reads the real VM stack from C.  Python cannot.  Options (from
+~doc/python/design-doc.org~):
+
+| Option | Effort | Fidelity |
+|--------+--------+----------|
+| Omit stack panel content | Low | Shows empty stack — poor UX |
+| ~dis.stack_effect~ simulation | Medium | Depth + approximate values for teaching |
+| ctypes / C-API read | High | Fragile; bad fit for Pyodide |
+
+*Recommendation:* simulate the evaluation stack during the monitoring callback
+by maintaining a Python list and applying per-opcode push/pop rules.  Start with
+depth-only rows; add value labels for ~LOAD_CONST~, ~LOAD_NAME~, ~BINARY_OP~,
+etc.  Reuse ~StackPanel~ and ~formatStackValue~ — map Python types to the
+existing ~StackValue.t~ union (~num~, ~str~, ~bool~, ~nil~, ~fn~).
+
+Frame boundaries: use ~sys.monitoring~ ~PY_START~ / ~PY_RETURN~ (or trace
+~call~ / ~return~ events) to build ~CallFrameInfo~ with ~base~ indices into the
+simulated stack.
+
+** Orchestrator wiring (~python-visualizer.ts~)
+
+After ~pyCore.run(source)~ succeeds:
+
+#+begin_src typescript
+const { steps = [], prints = [] } = result.data;
+this.executionStore.set({
+    steps,
+    prints,
+    currentStep: steps.length > 0 ? 0 : null,
+    playing: false,
+});
+#+end_src
+
+Do *not* push ~type:'print'~ messages to ~consoleStore~ when steps exist —
+same rule as Lox (~doc/todo/lox-execution/07-console-playback.org~).  Errors
+(SyntaxError, runtime exception) stay in ~consoleStore~.
+
+Apply ~MAX_STEPS~ cap in the emitter or orchestrator (prefer emitter so Pyodide
+does not run unbounded loops).
+
+** Types (~py-data.ts~)
+
+Extend ~PyRawData~:
+
+#+begin_src typescript
+import type { VmStep, TaggedPrint } from '@/compiler-viz/execution';
+
+export interface PyRawData {
+    // ... existing fields ...
+    steps?: VmStep[];
+    prints?: TaggedPrint[];
+}
+#+end_src
+
+Reuse ~VmStep~ verbatim — ~chunk~ maps to code object qualname (~"<module>"~,
+~foo~, etc.), ~offset~ to bytecode offset.  No TypeScript changes needed in
+panels if the JSON shape matches.
+
+* Shared improvements arriving separately
+
+These are being built against the Lox orchestrator first but target shared
+~compiler-viz~ code.  Python inherits panel/CSS work automatically.
+
+| Stream | Location | Python action |
+|--------+----------+---------------|
+| Panel labels | ~mount.ts~, ~layout.ts~ | None — already shared |
+| Responsive layout | ~static/css/lox-visualizer.css~ | None — pure CSS, no orchestrator hook |
+| AST touch nav | ~panels/ast-nav-controls.ts~ | None — shared ~AstPanel~ |
+| Playback keyboard shortcuts | ~doc/todo/lox-execution/06-polish.org~ | None — shared ~PlaybackControls~ |
+| Variable auto-play speed | same | None |
+
+Layout is one wrapping flex-row model at every width — no layout modes, no
+per-language JS — so the Python visualizer inherits it by mounting the same
+DOM.  Still worth verifying the Python tab on ~content/visualizers.md~ (hidden
+until selected) mounts and reflows correctly: two visualizer roots on one page
+remains the case most likely to break.
+
+* Python-specific gaps beyond Lox parity
+
+** Compile-only today vs "compiles and runs" copy
+
+~content/visualizers.md~ describes "bytecode generation, and execution."  The
+emitter must ~exec~ the compiled code object to populate steps and console
+output.  Static ~dis~ output alone is insufficient.
+
+** Optimizer / many-to-one bytecode↔AST mapping
+
+Already handled for static linking via ~_smallest_enclosing_start~.  During
+playback, the executing instruction may cover a wider span than a single AST
+node — ~applyExecHighlight~ uses ~instr.srcOffset~ which may highlight a parent
+node.  Acceptable; document in the post if needed.
+
+** Non-ASCII source
+
+Emitter ~_to_offset~ assumes UTF-16 columns for tokenize and UTF-8 byte columns
+for ast/dis — identical for ASCII.  Defer Unicode normalization unless a post
+needs it (~doc/python/design-doc.org~ § byte-vs-char).
+
+** Editor button label
+
+~EditorSlot~ shows "Build" (legacy Lox wording).  Consider "Run" for Python or
+rename globally in a separate polish pass (~doc/todo/multilang/~ Phase 5 CSS
+rename).
+
+** Pyodide load time
+
+~py-loading~ class disables Run during bootstrap (~python-visualizer.ts~).
+Execution tracing adds work inside ~run()~ but does not change the load story.
+
+* Out of scope (for this parity pass)
+
+- Operand-stack ctypes / C-API access.
+- ~symtable~ scope panel (~doc/python/design-doc.org~ bonus stage).
+- Per-post ~data-layout~ label overrides.
+- Renaming ~.lox-*~ CSS classes to ~.compiler-viz-*~ (multilang Phase 5).
+- Runtime error gating by step (open question in lox-execution/07).
+
+* Implementation order
+
+See [[file:00-overview.org][00-overview.org]] for parallelizable streams.
+
+#+begin_example
+Phase 0 (quick wins)     → bc-exec connector, executionStore hygiene, optional layout trim
+Phase 1 (emitter)        → sys.monitoring trace, stdout capture, stack simulation, JSON shape
+Phase 2 (orchestrator)   → wire steps/prints into ExecutionStore, console split, MAX_STEPS
+Phase 3 (verify)         → browser smoke on pyvis + visualizers tabs; vitest for py-data types
+Phase 4 (shared shell)   → wire viewport mode when mobile streams land (no blocker)
+#+end_example
+
+* Testing checklist
+
+- [ ] ~print(x)~ — console print appears at correct playback step, not before
+- [ ] Bytecode ► arrow tracks ~currentStep~; collapsed chunk ~<details>~ opens
+- [ ] AST node highlights during playback; bc-exec connector draws when visible
+- [ ] Stack panel shows simulated depth/values; empty state before first run
+- [ ] SyntaxError — panels clear, error in console, no phantom playback controls
+- [ ] Infinite loop — step cap fires, warning in console
+- [ ] Nested function — steps include nested chunk names; frame boundaries sane
+- [ ] Two visualizers on ~content/visualizers.md~ — independent state, no cross-talk
+- [ ] ~npx vitest run~ — extend ~py-data.test.ts~ for ~steps~ / ~prints~ parsing
+
+* Related docs
+
+- [[doc:../../python/design-doc.org][doc/python/design-doc.org]] — Python platform feasibility, sys.monitoring, stack gap
+- [[doc:../lox-execution/design.org][doc/todo/lox-execution/design.org]] — Lox execution design (event schema, panels)
+- [[doc:../lox-execution/07-console-playback.org][doc/todo/lox-execution/07-console-playback.org]] — console playback model
+- [[doc:../multilang/design-doc.org][doc/todo/multilang/design-doc.org]] — adapter architecture

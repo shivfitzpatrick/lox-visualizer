@@ -1,0 +1,264 @@
+#+title: Lox Visualizer Architecture Refactor — Overview
+#+date: 2026-06-18
+
+This directory breaks the refactor described in
+~doc/lox-visualizer-architecture.org~ into independent work streams.  Each
+numbered file is a *sequence* of tasks meant to be done in order by one
+person/agent.  Files in the same phase have no dependencies on each other and
+can be worked in *parallel*.
+
+The end state: ~LoxVisualizer~ shrinks to an orchestrator; conceptual state
+lives in a reactive store; each panel subscribes to the store and owns its own
+rendering and connector anchors; the connector overlay becomes a per-instance
+class instead of a module singleton.
+
+* Goal end-state file layout
+
+#+begin_example
+app/src/
+  lib/
+    component.ts          (unchanged)
+    store.ts              (new — 01)
+    styles.ts             (unchanged)
+  lox-visualizer/
+    connector-layer.ts    (new — 02, replaces connector.ts)
+    lox-data.ts           (new — 03)
+    visualization-panel.ts (new — 04)
+    panels/
+      lexer-panel.ts      (new — 05)
+      ast-panel.ts        (new — 06)
+      bytecode-panel.ts   (new — 07)
+    lox-visualizer.ts     (08, was lox-visualizer-demo.ts)
+    layout.ts             (new — 09, config + registry)
+    mount.ts              (new — 10, DOM builder)
+    slots/
+      editor-slot.ts      (new — 11)
+      console-slot.ts     (new — 11)
+    ast.ts                (mostly unchanged; richer return — 06; scoped selectors — 10)
+    bytecode.ts           (mostly unchanged — 07)
+    connector.ts          (deleted — 08)
+    state/state.ts        (mostly unchanged; LoxData export — 03)
+    events.ts, lox-core.ts, state/token.ts (unchanged)
+#+end_example
+
+* Phases and parallelism
+
+All phases below (1–4) are *complete* as of 2026-06-18.
+
+** Phase 1 — Foundations (fully parallel, no inter-dependencies)
+
+These three define the primitives everything else builds on.  They touch
+disjoint files and can be done simultaneously.
+
+- [[file:01-store.org][01-store.org]] — ~lib/store.ts~, ~createStore~, ~VisualizerSelection~
+- [[file:02-connector-layer.org][02-connector-layer.org]] — ~connector-layer.ts~, scoped ~ConnectorLayer~ class
+- [[file:03-lox-data.org][03-lox-data.org]] — ~lox-data.ts~, the ~LoxData~ snapshot type
+
+** Phase 2a — Panel base class (after Phase 1)
+
+- [[file:04-panel-base.org][04-panel-base.org]] — ~visualization-panel.ts~, the ~VisualizationPanel~
+  abstract base.  Depends on the *types/interfaces* from 01, 02, 03 (not their
+  full implementations — it only references ~Store~, ~ConnectorLayer~,
+  ~LoxData~, ~VisualizerSelection~).  Can start as soon as those signatures are
+  agreed; safest to start once Phase 1 lands.
+
+** Phase 2b — Panels (parallel with each other, after 04)
+
+Each wraps an existing renderer behind the ~VisualizationPanel~ interface.
+They touch disjoint files and can be done simultaneously.
+
+- [[file:05-lexer-panel.org][05-lexer-panel.org]] — wraps ~displayLex~ (currently inline in the demo)
+- [[file:06-ast-panel.org][06-ast-panel.org]] — wraps ~drawAst~; also enriches ~drawAst~'s return value
+- [[file:07-bytecode-panel.org][07-bytecode-panel.org]] — wraps ~drawBytecode~
+
+** Phase 3 — Orchestrator + cleanup (last; depends on everything)
+
+- [[file:08-orchestrator-and-cleanup.org][08-orchestrator-and-cleanup.org]] — rewrite ~lox-visualizer-demo.ts~ into
+  ~lox-visualizer.ts~, wire store/connectors/panels, delete ~connector.ts~,
+  update ~vite.config.js~, the post ~<script>~ tag, and the test that
+  references the old module.
+
+** Phase 4 — Programmatic layout (after Phase 3)
+
+The post currently hand-plants ~#lox-lexer~, ~#lox-ast~, etc.  Phase 4 moves
+mount + row layout into the app: the author supplies only the ~ ```nil ``` ~
+sample block; the orchestrator builds a ~.lox-visualizer~ container and places
+configurable panes into rows (row 1: editor + lexer; each further pane on its
+own row by default).
+
+- [[file:09-layout-config.org][09-layout-config.org]] — ~PanelKind~, ~VisualizerLayout~,
+  ~DEFAULT_LAYOUT~, panel registry types *(gate — do first)*
+- [[file:10-layout-mount.org][10-layout-mount.org]] — ~mountVisualizer~ DOM builder;
+  ~ast.ts~ scoped selector fix
+- [[file:11-editor-console-slots.org][11-editor-console-slots.org]] — ~EditorSlot~,
+  ~ConsoleSlot~ *(parallel with 10, 12 after 09)*
+- [[file:12-layout-css.org][12-layout-css.org]] — id → class CSS migration
+  *(parallel with 10, 11 after 09)*
+- [[file:13-orchestrator-layout.org][13-orchestrator-layout.org]] — rewire
+  ~lox-visualizer.ts~ *(after 09–12)*
+- [[file:14-post-markup.org][14-post-markup.org]] — strip panel divs from cloxvis
+  post *(after 13)*
+
+* Dependency graph
+
+#+begin_example
+Phase 1–3 (complete):
+        01-store ─┐
+   02-connector ─┼─→ 04-panel-base ─→ 05-lexer ─┐
+    03-lox-data ─┘                  ├ 06-ast   ─┼─→ 08-orchestrator + cleanup
+                                    └ 07-bytecode┘
+
+Phase 4 (layout):
+   09-layout-config ─┬─→ 10-layout-mount ────┐
+                     ├─→ 11-editor-console-slots ─┼─→ 13-orchestrator-layout ─→ 14-post-markup
+                     └─→ 12-layout-css ──────────┘
+#+end_example
+
+* Breaking changes and safe sequencing
+
+Phases 1 and 2b are *mostly additive* (new files), but the running site keeps
+using the old ~lox-visualizer-demo.ts~ until Phase 3 cuts over.  Any task that
+edits a *shared file the old demo still imports* can break ~main~ before the
+cutover.  There are exactly two such mid-stream hazards, plus the intentional
+Phase 3 cutover.
+
+| Phase | Breaking? | Cause |
+|-------+-----------+-------|
+| 01 store | no | all new files |
+| 02 connector-layer | no | new file; ~connector.ts~ stays |
+| 03 lox-data | low | optional type-tighten in ~state.ts~ (typecheck only) |
+| 04 panel-base | *yes, conditional* | lifecycle edit to ~lib/component.ts~ |
+| 05 lexer-panel | low | only if the theme extraction strips the demo |
+| 06 ast-panel | *yes* | ~drawAst~ signature change in ~ast.ts~ |
+| 07 bytecode-panel | no | ~drawBytecode~ already takes ~onClick~ |
+| 08 orchestrator + cleanup | *yes, by design* | the atomic cutover |
+
+** The two mid-stream traps
+
+1. *06 edits ~ast.ts~*: the old demo does ~this.focusByStart = drawAst(...)~
+   expecting a *function* return (demo line 280).  Making ~drawAst~ return an
+   ~AstHandle~ object breaks the demo at compile + runtime.
+2. *04 edits ~lib/component.ts~*: the old demo relies on ~Component~'s
+   constructor auto-calling ~setUp()~ (bare ~new LoxVisualizer()~, demo line
+   322).  Removing that call orphans the demo's startup until 08 rewires it.
+
+~03~'s optional type change is a milder instance of the same shared-file theme
+(typecheck-only, no runtime change).
+
+** Rule: keep ~main~ green until the Phase 3 cutover
+
+Two acceptable strategies — pick one per hazard and note it in the task:
+
+- *Backward-compatible edit* (preferred when easy): change the shared file in a
+  way the old demo still tolerates.
+  - ~drawAst~: return an object that is *also* callable (assign the getters onto
+    the existing ~focusByStart~ function), or add ~AstHandle~ getters without
+    removing the old return shape.  The demo's ~this.focusByStart = drawAst(...)~
+    keeps working; the new ~AstPanel~ uses the richer fields.
+  - ~component.ts~: introduce the new lifecycle *without* deleting the
+    constructor ~setUp()~ call (e.g. an opt-in flag), so the old demo is
+    unaffected; flip the default during 08.
+- *Defer to Phase 3*: move the breaking part of the edit so it lands in the same
+  commit as the orchestrator swap (08).  Phases 1–2 then stay strictly additive.
+
+Either way, the breaking step must land *with or after* 08 removes the old demo,
+never before.  ~07~ and (if kept additive) ~05~, plus all of Phase 1, can merge
+to ~main~ independently at any time.
+
+* Cross-cutting design notes (read before starting any stream)
+
+** State management: one store primitive; ~d3.dispatch~ only for the raw stream
+
+There are two distinct kinds of reactive plumbing in this app; do not conflate
+them:
+
+1. *Event stream* — discrete, fire-and-forget events from the WASM bridge
+   (~lexer~, ~parser~, ~compiler~, ~stdout~, …).  This already uses
+   ~d3.dispatch~ in ~lox-core.ts~ (~events.call(type, …)~ / ~events.on(type, …)~)
+   and *stays that way*.  ~d3.dispatch~ is the right tool for an event emitter.
+2. *Observable state* — a single current value you read and react to changes
+   on (~VisualizerSelection~; and the derived ~LoxData~ snapshot).  This uses the
+   new ~Store<T>~ (~lib/store.ts~).
+
+All cross-component *state* — selection *and* compiler-derived data — goes
+through the ~Store~.  ~d3.dispatch~ is deliberately *not* used as the store's
+notification mechanism, and not because of dependency cost (d3 is a core
+dependency already).  It is the wrong abstraction for state:
+
+- *No current value.*  Panels subscribe in ~setUp~, possibly *after* data has
+  already arrived; ~store.get()~ lets a late subscriber initialize immediately,
+  whereas a dispatcher only delivers *future* events.
+- *Anonymous, dynamic subscribers.*  ~dispatch.on('change', fn)~ overwrites any
+  prior handler of the same typename unless each gets a unique ~.name~ suffix;
+  managing those names for an interchangeable set of panels is error-prone.  The
+  ~Set<fn>~ store takes any number of anonymous subscribers and returns an
+  unsubscribe.
+- *Change dedup.*  The ~set~ loop-guard (no-op when nothing changed) is what
+  prevents the ~selectedAstNode~ write-back feedback loop; a dispatcher has no
+  such notion, so you'd hand-build it anyway.
+
+Boundary: ~lox-core~ (d3 events) → orchestrator accumulates → ~Store~ →
+panels.  See "Two stores" next.
+
+** Two stores: selection and data
+
+Use two ~Store~ instances, not one combined object, so a selection change does
+not wake the (heavier) data subscribers and vice-versa.  The store is tiny, so
+extra instances are free.
+
+- ~selectionStore: Store<VisualizerSelection>~ — ~{ selectedStart, selectedAstNode }~.
+- ~dataStore: Store<{ data: LoxData | null }>~ — the latest derived snapshot.
+
+The orchestrator accumulates raw events as today; when a run *finishes*
+aggregating it derives once and does ~dataStore.set({ data })~ in a single shot
+(no incremental store writes — the store needs no ~update~/append helper).
+Panels subscribe to *both* stores in their base ~setUp~ and prime themselves
+from ~get()~.  This replaces the manual ~for (panel of panels) onDataChange(...)~
+fan-out.
+
+** The store is the only cross-panel channel
+
+Panels never call each other.  A user interaction in panel A writes to the
+store; panels B and C react in their ~onSelectionChange~.  The shared key is
+~selectedStart~ (a source character offset coming from compiler/parser events),
+mirroring today's ~data-start~ / ~src_offset~ matching.
+
+** Who owns ~selectedAstNode~
+
+~VisualizerSelection~ carries both ~selectedStart~ and ~selectedAstNode~.  Only
+the AST panel can resolve a ~start~ to a full ~AstNode~ (it holds the d3
+hierarchy).  Agreed protocol:
+
+- Lexer/bytecode panels write only ~{ selectedStart }~ on click.
+- The AST panel, in its ~onSelectionChange~, if ~selectedAstNode~ is null but
+  ~selectedStart~ is set, resolves the node and writes ~{ selectedAstNode }~
+  back to the store (a second, idempotent ~set~).
+- The lexer panel uses ~selectedAstNode~ (when present) to highlight the whole
+  subtree, falling back to the single ~selectedStart~ span otherwise.
+
+To avoid infinite update loops, ~createStore.set~ must no-op when the patch
+does not change any value (see 01).
+
+** Anchors and the declared topology
+
+Panels do not draw lines.  After updating their DOM they call
+~connectors.setAnchor(this.panelId, rect | null)~.  The topology is declared
+once in the orchestrator:
+
+#+begin_src typescript
+connectors.addLine('ast', 'lexer', colors.highlight);
+connectors.addLine('ast', 'bc',    colors.highlight);
+#+end_src
+
+This reproduces today's two connectors (~ast-lexer~ and ~bc-ast~).
+
+** Component lifecycle wrinkle (affects 04 and 08)
+
+~Component~'s constructor calls ~this.setUp()~ automatically
+(~app/src/lib/component.ts~).  Today ~LoxVisualizer~ works around this by
+calling ~Component.prototype.setUp.apply(this)~ manually and never populating
+~children~.  Once panels live in ~children~ and the base ~setUp~ subscribes to
+the store, naive use would double-invoke ~setUp~ (once from each panel's own
+constructor, once from the parent propagating).  Decide the lifecycle contract
+up front — options captured in 04 and 08 open questions.  This must be settled
+before 08 wires panels into ~children~.

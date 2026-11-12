@@ -1,0 +1,406 @@
+#+title: Compiler Error Handling and Error Pane
+#+date: 2026-06-19
+
+Two goals: keep the visualizer alive when the Lox compiler or runtime encounters
+an error, and surface those errors in a dedicated panel next to the output pane
+instead of mixing them into the console's print stream.
+
+* Overview
+
+Currently, errors from the Lox WASM module flow into =ConsoleStore= alongside
+print output. They appear in the console panel with a =console-error= CSS class,
+but are visually mixed with program output. More importantly, the lox visualizer
+has two failure modes that leave it in a broken state:
+
+1. *WASM exception*: If =lox.exports.runSource()= throws (a WASM panic or a
+   native JS exception propagated out of the module), the exception bubbles
+   uncaught through =setUp()= or =rerun()=, crashing the async lifecycle.
+
+2. *Missing render trigger*: =render()= is driven by event callbacks that fire
+   inside =runSource()=. If the WASM exits early — before the lexer EOF or
+   parser PROGRAM_CLOSE event fires — =render()= is never called and the UI
+   remains at whatever state it was in before the run.
+
+The Python visualizer already handles both of these correctly: =setUp()= wraps
+=loadPyCore()= in try/catch, and =run()= checks =result.ok= then explicitly sets
+=dataStore= on the error path. The fix for Lox mirrors that pattern.
+
+Both visualizers need updating together because they share =DEFAULT_LAYOUT=,
+=createDefaultPanelRegistry=, =PanelContext=, and =ConsoleMessage= — changes to
+any of those immediately affect both.
+
+* Stores
+
+** New: ErrorStore
+
+Add to =app/src/compiler-viz/types.ts=:
+
+#+begin_src typescript
+export type ErrorStore = Store<{ messages: string[] }>;
+#+end_src
+
+Errors are plain strings. The orchestrator sets this store; the panel only reads
+it. Structure is simpler than =ConsoleMessage= because errors have no source
+offsets or connector anchors.
+
+** ConsoleStore: remove error messages
+
+The =ConsoleMessage= union currently has a ='error'= variant used to store
+runtime errors in the same array as print lines. With =ErrorStore= taking over,
+drop the error variant entirely:
+
+#+begin_src typescript
+// Before
+export type ConsoleMessage =
+    | { type: 'print'; text: string; chunk?: string; offset?: number; srcOffset?: number }
+    | { type: 'error'; text: string };
+
+// After
+export type ConsoleMessage =
+    { type: 'print'; text: string; chunk?: string; offset?: number; srcOffset?: number };
+#+end_src
+
+Dropping the variant causes TypeScript to flag every call site that produces or
+branches on ='error'= — use those errors to drive the implementation order.
+Affected sites (both visualizers):
+
+- =console-panel.ts=: class-name branch and the =m.type === 'error'= filter in =renderAll()=
+- =lox-visualizer.ts=: the stderr handler that pushes ={ type: 'error' }= to =loxState=
+  and the MAX_STEPS cap error message
+- =python-visualizer.ts=: =pushError()=, the =exec_error= path, the =steps_capped= path,
+  and the =data.console= mapping that produces ={ type: 'error' }= entries
+- =py-data.ts=: =PyRawData.console= is typed as
+  =Array<{ type: 'print' | 'error'; ... }>= — update to =type: 'print'= only,
+  or keep the raw type as-is and drop the error branch when mapping to
+  =ConsoleMessage=
+
+* PanelKind and Layout
+
+** Add ='errors'= to PanelKind
+
+In =app/src/compiler-viz/layout.ts=:
+
+#+begin_src typescript
+export type PanelKind =
+    | 'editor' | 'lexer' | 'ast' | 'bytecode'
+    | 'console' | 'errors'               // ← new
+    | 'stack' | 'playback';
+
+const PANEL_KINDS: readonly PanelKind[] = [
+    'editor', 'lexer', 'ast', 'bytecode', 'console', 'errors', 'stack', 'playback',
+];
+
+export const PANEL_LABELS: Readonly<Record<PanelKind, string>> = {
+    // ... existing ...
+    errors: 'Errors',
+};
+#+end_src
+
+=panelShellId= needs no special case; the default ='lox-errors'= id is fine.
+
+** Default layout
+
+Change the bottom row from a standalone console to a console + errors pair:
+
+#+begin_src typescript
+export const DEFAULT_LAYOUT: VisualizerLayout = [
+    ['editor', 'lexer'],
+    ['ast'],
+    ['playback'],
+    ['bytecode', 'stack'],
+    ['console', 'errors'],   // ← was ['console']
+];
+#+end_src
+
+** PanelContext
+
+Add =errorStore= alongside =consoleStore=:
+
+#+begin_src typescript
+export interface PanelContext {
+    // ... existing fields ...
+    errorStore: ErrorStore;
+}
+#+end_src
+
+* ErrorPanel
+
+New file: =app/src/compiler-viz/panels/error-panel.ts=.
+
+The panel is simpler than =ConsolePanel= — no selection, no connector anchors,
+no execution store integration. It implements =VisualizerSlot= (same pattern as
+=EditorSlot=) rather than =VisualizationPanel=.
+
+#+begin_src typescript
+import { panelSelection } from '@/compiler-viz/d3-utils';
+import { Component } from '@/lib/component';
+import type { ErrorStore } from '@/compiler-viz/types';
+
+export class ErrorPanel extends Component {
+    readonly slotId = 'errors' as const;
+    private unsub?: () => void;
+
+    constructor(
+        private container: HTMLElement,
+        private errorStore: ErrorStore,
+    ) {
+        super([], false);
+    }
+
+    setUp() {
+        this.unsub = this.errorStore.subscribe(() => this.render());
+        this.render();
+        super.setUp();
+    }
+
+    tearDown() {
+        this.unsub?.();
+        this.unsub = undefined;
+        super.tearDown();
+    }
+
+    private render(): void {
+        const { messages } = this.errorStore.get();
+        panelSelection(this.container)
+            .selectAll<HTMLDivElement, string>('div')
+            .data(messages, (_d, i) => i)
+            .join('div')
+            .attr('class', 'error-line')
+            .text((d) => d);
+    }
+}
+#+end_src
+
+Register in =createDefaultPanelRegistry()= in =layout.ts=:
+
+#+begin_src typescript
+registry.set(
+    'errors',
+    (container) => new ErrorPanel(container, ctx.errorStore),
+);
+#+end_src
+
+* Lox Orchestrator Changes (lox-visualizer.ts)
+
+** Create and own the ErrorStore
+
+#+begin_src typescript
+const errorStore = createStore<{ messages: string[] }>({ messages: [] });
+#+end_src
+
+Pass it into =PanelContext= and down to =LoxVisualizer= alongside =consoleStore=.
+
+** Wire stderr to ErrorStore
+
+Change the stderr handler from pushing into =consoleMessages= to pushing into
+=errorStore=:
+
+#+begin_src typescript
+lox.events.on('stderr', (text) => {
+    this.errorStore.set({
+        messages: [...this.errorStore.get().messages, text],
+    });
+});
+#+end_src
+
+** Wrap runSource in try/catch with render guarantee
+
+Both =setUp()= and =rerun()= call =lox.exports.runSource(text)=. Extract a
+helper:
+
+#+begin_src typescript
+private runSource(text: string): void {
+    try {
+        this.lox.exports.runSource(text);
+    } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        this.errorStore.set({
+            messages: [...this.errorStore.get().messages, `Internal error: ${msg}`],
+        });
+    } finally {
+        if (!this.rendered) {
+            this.rendered = true;
+            this.render();
+        }
+    }
+}
+#+end_src
+
+The =finally= block covers the case where WASM exits before the lexer EOF or
+parser PROGRAM_CLOSE event fires, leaving =this.rendered = false= and the UI
+in a stale state.
+
+Also move the MAX_STEPS cap message from pushing to =consoleMessages= to pushing
+to =errorStore=:
+
+#+begin_src typescript
+if (this.stepBuffer.length >= MAX_STEPS) {
+    this.errorStore.set({
+        messages: [
+            ...this.errorStore.get().messages,
+            `Execution trace capped at ${MAX_STEPS.toLocaleString()} steps — program may have an infinite loop.`,
+        ],
+    });
+}
+#+end_src
+
+** Clear errorStore on rerun
+
+In =rerun()=, reset the store alongside the console:
+
+#+begin_src typescript
+this.errorStore.set({ messages: [] });
+#+end_src
+
+* Python Orchestrator Changes (python-visualizer.ts)
+
+The python visualizer is already wired to the shared layout infrastructure
+(=DEFAULT_LAYOUT=, =createDefaultPanelRegistry=, =PanelContext=) and will get
+the errors pane automatically. However, all its own error-pushing calls
+currently go to =consoleStore= via =pushError()= and need to redirect.
+
+** Create and own the ErrorStore
+
+Same as the lox orchestrator — create =errorStore= in =fromPage()=, pass into
+=PanelContext=, own in the constructor.
+
+** Replace pushError
+
+#+begin_src typescript
+private pushError(text: string) {
+    this.errorStore.set({
+        messages: [...this.errorStore.get().messages, text],
+    });
+}
+#+end_src
+
+This covers the =loadPyCore()= failure path and the =!result.ok= path.
+
+** Move exec_error and steps_capped to errorStore
+
+In =run()=:
+
+#+begin_src typescript
+const errors: string[] = [];
+if (data.exec_error) errors.push(data.exec_error);
+if (data.steps_capped || steps.length >= MAX_STEPS) {
+    errors.push(
+        `Execution trace capped at ${MAX_STEPS.toLocaleString()} steps — program may have an infinite loop.`,
+    );
+}
+if (errors.length > 0) {
+    this.errorStore.set({ messages: errors });
+}
+#+end_src
+
+** data.console mapping
+
+=data.console= is typed with =type: 'print' | 'error'= entries. Since there is
+no longer an error variant in =ConsoleMessage=, filter to print-only:
+
+#+begin_src typescript
+const consoleMsgs: ConsoleMessage[] = (data.console ?? [])
+    .filter((m) => m.type === 'print')
+    .map((m) => ({ type: 'print' as const, text: m.text, srcOffset: m.src_offset }));
+publishConsoleMessages(this.consoleStore, consoleMsgs);
+#+end_src
+
+If Python-side error lines in =data.console= are meaningful, push them to
+=errorStore= instead of discarding them.
+
+** Clear errorStore on run
+
+At the top of =run()=:
+
+#+begin_src typescript
+this.errorStore.set({ messages: [] });
+#+end_src
+
+* ConsolePanel Simplification
+
+With the error variant removed from =ConsoleMessage=, =renderAll()= no longer
+needs to filter for error messages and the =renderMessages()= class-name branch
+can be simplified:
+
+#+begin_src typescript
+// Before
+.attr('class', (d) => {
+    if (d.type === 'error') return 'console-error';
+    return d.srcOffset != null ? 'console-print console-selectable' : 'console-print';
+})
+
+// After
+.attr('class', (d) =>
+    d.srcOffset != null ? 'console-print console-selectable' : 'console-print',
+)
+#+end_src
+
+The =renderAll()= path that spliced errors in front of playback prints can also
+be simplified — there are no longer any error messages to prepend.
+
+* CSS
+
+Add to =static/css/lox-visualizer.css= (or the SCSS source):
+
+#+begin_src css
+.lox-panel--errors {
+    font-family: var(--font-mono, monospace);
+    font-size: 0.875rem;
+    padding: 0.5rem;
+    overflow-y: auto;
+    color: var(--color-error, #e06c75);
+}
+
+.error-line {
+    white-space: pre-wrap;
+    padding: 2px 0;
+}
+
+.lox-panel--errors:empty::before,
+.lox-panel--errors div:empty ~ div:last-child::after {
+    content: 'No errors.';
+    color: var(--color-muted, #aaa);
+    font-style: italic;
+}
+#+end_src
+
+The empty-state selector needs care: d3's data join removes all child divs when
+=messages= is empty, so =:empty= on the panel itself is correct.
+
+* Implementation Order
+
+Both visualizers share infrastructure, so changes to =types.ts= and =layout.ts=
+must be made once and cover both.
+
+1. *Types*: Drop the ='error'= variant from =ConsoleMessage=. Add =ErrorStore=
+   to =types.ts=. Let TypeScript enumerate all broken call sites — use those as
+   the task list for steps 4–6.
+
+2. *PanelKind*: Add ='errors'= to the union and =PANEL_KINDS= / =PANEL_LABELS=
+   in =layout.ts=. That is the whole change — =PANEL_LABELS= is the only
+   =Record<PanelKind, ...>= left, so nothing else breaks on the wider union.
+
+3. *ErrorPanel*: Create =panels/error-panel.ts=. Register in
+   =createDefaultPanelRegistry()=. Extend =PanelContext= with =errorStore=.
+
+4. *Lox orchestrator*: Create =errorStore= in =fromPage()=, thread through
+   constructor, wire stderr to it, add =private runSource()= helper with
+   try/catch + render guarantee, move MAX_STEPS message, clear on rerun.
+
+5. *Python orchestrator*: Create =errorStore= in =fromPage()=, thread through
+   constructor, update =pushError()=, redirect =exec_error= / =steps_capped= /
+   =data.console= error items to =errorStore=, clear on run.
+
+6. *ConsolePanel*: Remove error filter in =renderAll()=, simplify class-name
+   branch in =renderMessages()=.
+
+7. *Layout*: Change =DEFAULT_LAYOUT= bottom row to ==['console', 'errors']=.
+
+8. *CSS*: Add error panel styles.
+
+9. *Smoke tests*:
+   - Lox compile error (e.g. =var x = ;=): error pane shows the error, output
+     pane is empty, editor stays editable.
+   - Lox valid program: error pane shows "No errors.", output pane shows prints.
+   - Python syntax error: error pane shows the error, output pane is empty.
+   - Python valid program: error pane is empty, output pane shows prints.

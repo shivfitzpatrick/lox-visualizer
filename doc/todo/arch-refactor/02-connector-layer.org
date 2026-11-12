@@ -1,0 +1,168 @@
+#+title: Scoped Connector Layer
+#+date: 2026-06-18
+#+phase: 1 (foundation — parallel with 01, 03)
+
+Replace the module-level singleton ~connector.ts~ with a per-instance
+~ConnectorLayer~ class.  Each visualizer owns one layer; panels register
+*anchor rects* and the layer draws lines between declared anchor pairs.  Panels
+never draw lines themselves and never learn about each other.
+
+* Background
+
+~app/src/lox-visualizer/connector.ts~ keeps a module-global ~overlay~ SVG and a
+module-global ~Map~ of keyed lines (~'ast-lexer'~, ~'bc-ast'~).  Consequences:
+
+- Only one overlay can exist per page; two visualizer instances collide.
+- Callers (the orchestrator) must know both endpoints of every line and call
+  ~drawConnector(key, fromRect, toRect, color)~ imperatively, which is why
+  ~onHighlight~ / ~onInstructionClick~ in the demo are tangled.
+
+The new model inverts this: the *topology* (which anchors connect) is declared
+once; panels only publish "here is my current rect for anchor X".
+
+* Target API
+
+#+begin_src typescript
+export class ConnectorLayer {
+    constructor(container: Element) {}
+
+    // Declare a connection between two named anchors. Called once at setup.
+    addLine(fromId: string, toId: string, color: string): void;
+
+    // Called by a panel after it updates its DOM to reflect new state.
+    // Passing null clears that anchor and hides any lines involving it.
+    setAnchor(panelId: string, rect: DOMRect | null): void;
+
+    // Redraws all lines whose both endpoints are currently set.
+    // Called automatically by setAnchor.
+    redraw(): void;
+
+    // Call on resize/scroll.
+    refresh(): void;
+
+    destroy(): void;
+}
+#+end_src
+
+* Tasks
+
+** DONE Create ~connector-layer.ts~ with overlay lifecycle
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/connector-layer.ts (new)
+   :END:
+
+Constructor creates one ~<svg>~ overlay (instance-owned, not module-global) and
+appends it.  Reuse the styling from the old module:
+
+#+begin_src
+position:fixed;top:0;left:0;width:100vw;height:100vh;pointer-events:none;z-index:9999
+#+end_src
+
+Because rects come from ~getBoundingClientRect()~ (viewport coordinates), a
+~position: fixed~ full-viewport overlay needs no coordinate translation — keep
+that property.  ~destroy()~ removes the overlay element and clears internal
+maps.
+
+Store the ~container~ for now even if the overlay is appended to
+~document.body~ (see open questions); it documents ownership and allows a later
+switch to container-relative positioning.
+
+** DONE Implement anchor + topology state
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/connector-layer.ts
+   :END:
+
+Internal state:
+
+- ~anchors: Map<string, DOMRect | null>~ — current rect per panel id.
+- ~lines: Array<{ fromId: string; toId: string; color: string; el: SVGLineElement }>~
+  — declared topology, one ~<line>~ element created per ~addLine~.
+
+~addLine(fromId, toId, color)~: create an SVG ~<line>~, append to the overlay,
+push a record.  Initialize both anchors to ~null~ if absent.  The line starts
+hidden.
+
+~setAnchor(panelId, rect)~: store ~rect~ (or ~null~) for ~panelId~, then call
+~redraw()~.
+
+** DONE Implement ~redraw~ (line geometry)
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/connector-layer.ts
+   :END:
+
+For each declared line: if either endpoint's anchor is ~null~, hide the line
+(~style.display = 'none'~); otherwise position and show it.
+
+Port the edge-selection geometry verbatim from the old ~drawConnector~ so
+behavior is identical:
+
+#+begin_src typescript
+const x1 = from.left + from.width / 2;
+const x2 = to.left + to.width / 2;
+let y1, y2;
+if (from.top > to.bottom)      { y1 = from.top;    y2 = to.bottom; }
+else if (from.bottom < to.top) { y1 = from.bottom; y2 = to.top; }
+else                           { y1 = from.top + from.height / 2;
+                                 y2 = to.top + to.height / 2; }
+#+end_src
+
+Apply ~stroke~ = the line's color, ~stroke-width: 2~, ~stroke-dasharray: 4 3~
+(matching the old look).
+
+** DONE Implement ~refresh~ and ~destroy~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/connector-layer.ts
+   :END:
+
+- ~refresh()~: just call ~redraw()~.  The orchestrator will wire this to
+  ~window~ ~resize~/~scroll~ (replacing today's ~resizeHandler~).  Note: stored
+  rects go stale on scroll/resize; ~refresh~ alone redraws with *cached* rects.
+  Whether panels must re-publish fresh rects on refresh is an open question
+  below — for parity with today's behavior, the orchestrator currently
+  re-derives rects, so document that the panels' ~refresh~ path may need to
+  re-measure.  Keep ~ConnectorLayer.refresh~ a pure redraw; re-measuring is the
+  panels'/orchestrator's job.
+- ~destroy()~: remove the overlay from the DOM, clear ~anchors~ and ~lines~.
+
+** DONE Map the existing two connectors onto anchors
+   :PROPERTIES:
+   :files:    (design note — consumed by 06, 07, 08)
+   :END:
+
+Document the anchor ids and lines so the panel streams agree:
+
+| Old key      | Line (addLine)         | ~from~ anchor source            | ~to~ anchor source                 |
+|--------------+------------------------+---------------------------------+------------------------------------|
+| ~ast-lexer~  | ~addLine('ast','lexer')~ | AST selected node ~rect~ rect | primary lexer span rect            |
+| ~bc-ast~     | ~addLine('ast','bc')~    | AST selected node ~rect~ rect | selected bytecode row rect         |
+
+Anchors: ~'ast'~ (set by the AST panel), ~'lexer'~ (set by the lexer panel),
+~'bc'~ (set by the bytecode panel).  Both declared lines share the ~'ast'~
+anchor, which is why the AST node rect must be published whenever selection
+changes.
+
+** DONE Unit-test geometry where practical
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/connector-layer.test.ts (new, optional)
+   :END:
+
+The SVG/DOM parts are hard to unit-test under vitest's default environment, but
+the line-endpoint math can be factored into a pure helper
+(~computeEndpoints(from, to)~) and tested directly with fabricated
+~DOMRect~-like objects covering the three vertical cases (above, below,
+overlapping).
+
+* Open questions
+
+- *Overlay parent*: the architecture says ~new ConnectorLayer(visualizerRootEl)~.
+  Appending the overlay to the root vs ~document.body~ matters only if the root
+  establishes a stacking/transform context.  Given coordinates are viewport
+  fixed, appending to ~document.body~ is simplest and matches today.  Decide and
+  note it; ~container~ is still passed for future use.
+- *Stale rects on scroll*: ~refresh~ redraws cached rects, which drift if the
+  AST canvas is panned.  Today the orchestrator re-derives on resize.  Decide
+  whether ~refresh~ should ask panels to re-measure (e.g. the orchestrator calls
+  each panel's re-anchor path) — likely handled in 08.
+- *>2 panels on one anchor*: intentionally not auto all-to-all; topology is
+  declared.  See the architecture doc's open question — keep ~ConnectorLayer~
+  pair-based for now.

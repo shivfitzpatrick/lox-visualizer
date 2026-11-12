@@ -1,0 +1,63 @@
+#+title: Panel Labels — Tests & Polish
+#+date: 2026-06-19
+#+phase: 3 (after 03)
+
+Validate label text, nesting, and visual alignment.  Close open questions from
+earlier streams.
+
+* Background
+
+Depends on: 01 (metadata), 02 (DOM), 03 (CSS).
+
+* Tasks
+
+** DONE Assert label text in ~mount.test.ts~
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/mount.test.ts
+   :END:
+
+Extend ~buildLayoutDOM~ test for ~DEFAULT_LAYOUT~:
+
+#+begin_src typescript
+for (const kind of kindsInLayout(DEFAULT_LAYOUT)) {
+    const shell = containers.get(kind)!;
+    const label = shell.previousElementSibling;
+    assert.isTrue(label?.classList.contains('lox-panel-label'));
+    assert.equal(label?.textContent, panelLabel(kind));
+}
+#+end_src
+
+Import ~kindsInLayout~ and ~panelLabel~ from ~layout.ts~.
+
+** DONE Minimal layout smoke test
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/mount.test.ts
+   :END:
+
+~buildLayoutDOM([['lexer']])~ produces one ~.lox-pane~ with label "Lexer".
+Confirms labels are not hard-coded to ~DEFAULT_LAYOUT~ only.
+
+** TODO Visual QA checklist
+   :PROPERTIES:
+   :END:
+
+Manual pass on the cloxvis post (desktop width):
+
+- [ ] Source / Lexer row: both labels right-aligned above their panes
+- [ ] Parser label above AST shell; tree renders inside padded border
+- [ ] Playback label above controls bar
+- [ ] Bytecode + Stack row: labels align; stack stretches with bytecode
+- [ ] Output label visible before first run (console empty)
+- [ ] After run with ~print~: console content appears below "Output" label
+- [ ] Python visualizer post (if available): same label set
+
+* Acceptance
+
+- ~npm test -- mount.test layout.test~ passes.
+- Visual QA checklist complete (or issues filed as follow-ups).
+- No changes required to individual panel implementations.
+
+* Follow-ups (optional)
+
+- Allow ~data-label~ overrides on the entry script tag (only if a post needs
+  custom wording).

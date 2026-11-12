@@ -1,0 +1,11 @@
+fun loopPrinter(addMe, minusMe) {
+  var i = 0;
+  while (i < 10) {
+    print addMe + i - minusMe;
+    i = i + 1;
+  }
+}
+
+loopPrinter(5, (2 + 1));
+print !true;
+print true and false;

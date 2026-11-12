@@ -1,0 +1,96 @@
+#+title: Phase 3b — Vite Entry + Hugo Stub Post
+#+date: 2026-06-18
+#+phase: 3b (parallel with 09; gate for 11)
+
+Add the second Vite bundle entry for ~python-visualizer~ and create the stub
+Hugo post that will host the Python visualizer.  No TypeScript logic — this is
+build infrastructure and content scaffolding only.
+
+* Background
+
+The Lox visualizer is a single Vite entry
+(~lox-visualizer/lox-visualizer.ts~) that builds to
+~public/js/lox-visualizer/lox-visualizer.js~.  The Python visualizer needs the
+same treatment: a second entry that produces
+~public/js/python-visualizer/python-visualizer.js~.
+
+The Hugo post mirrors the cloxvis post structure: prose, one ~<script
+type="module">~ tag pointing at the bundle, and one fenced code block
+(~.language-python~) as the sample program anchor.
+
+* Tasks
+
+** DONE Add ~python-visualizer~ entry to ~vite.config.js~
+   :PROPERTIES:
+   :files: vite.config.js
+   :END:
+
+Add a second input alongside the existing ~lox-visualizer~ entry:
+
+#+begin_src javascript
+rollupOptions: {
+    input: {
+        'lox-visualizer/lox-visualizer':
+            resolve(__dirname, 'app/src/lox-visualizer/lox-visualizer.ts'),
+        'python-visualizer/python-visualizer':
+            resolve(__dirname, 'app/src/python-visualizer/python-visualizer.ts'),
+    },
+    // …
+}
+#+end_src
+
+The shared ~compiler-viz~ code will land in an auto-generated chunk (Rollup
+deduplication).  No manual ~manualChunks~ needed.
+
+Note: the ~python-visualizer.ts~ entry file does not need to exist yet for the
+config to be committed, but the Vite build will fail until [[file:11-py-orchestrator.org][11]] creates it.
+If you want the build to pass immediately, create a minimal stub:
+
+#+begin_src typescript
+// python-visualizer.ts — Phase 3 skeleton placeholder
+export {};
+#+end_src
+
+** DONE Add stub post to ~content-org/posts.org~
+   :PROPERTIES:
+   :files: content-org/posts.org
+   :END:
+
+Add an org subtree for the Python visualizer post, placed after the existing
+cloxvis post subtree.  It does not need prose yet — just enough for the Hugo
+export to produce a page and for the panels to mount.
+
+The post must include:
+
+1. A ~<script type="module">~ tag pointing at the python-visualizer bundle:
+   #+begin_src html
+   <script src="/js/python-visualizer/python-visualizer.js" type="module"></script>
+   #+end_src
+
+2. A fenced Python code block that the selector ~.language-python~ will match:
+   #+begin_src
+   ```python
+   x = 1 + 2
+   print(x)
+   ```
+   #+end_src
+
+Mirror the cloxvis post's heading properties (~:EXPORT_FILE_NAME:~,
+~:EXPORT_DATE:~, ~:EXPORT_HUGO_DRAFT:~ set to ~true~ initially).
+
+The ~#lox-console~, ~#lox-lexer~, ~#lox-ast~, ~#lox-compiler~ hand-planted
+divs should *not* appear in the new post — the orchestrator mounts the layout
+DOM itself (that was the whole point of the arch refactor).
+
+* Acceptance
+
+- ~make build~ (or ~npx vite build~) includes both entries in output without
+  error (once the orchestrator file exists from task 11).
+- Hugo generates a draft post page at the expected URL.
+- The post HTML contains ~.language-python~ code block and the
+  ~python-visualizer.js~ script tag.
+
+* Notes
+
+Parallel with [[file:09-py-data-layer.org][09]].  The Vite build will only fully pass once
+[[file:11-py-orchestrator.org][11]] creates the entry file.

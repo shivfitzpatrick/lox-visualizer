@@ -1,0 +1,274 @@
+#+title: Lox Visualizer Crash Resilience
+#+date: 2026-08-03
+
+Companion to ~design.org~ in this directory. That document plans *where* errors
+are displayed (a dedicated Errors pane, split out of the console). This one
+plans *what happens to the app* when the WASM module fails — the UI is currently
+left permanently wedged, and the trigger is far broader than a genuine crash.
+
+Phase 0 below is independent of the Errors pane and should land first: it is a
+small, self-contained change that stops the visualizer from becoming unusable.
+
+* Problem
+
+** Any Lox error is an exception, not just a crash
+
+~clox/src/main_wasm.c~ ends with:
+
+#+begin_src c
+  if (result == INTERPRET_COMPILE_ERROR) exit(65);
+  if (result == INTERPRET_RUNTIME_ERROR) exit(70);
+#+end_src
+
+The wasm build (~WASM_FLAGS~ in the clox Makefile) does not set ~EXIT_RUNTIME~,
+so the glue has ~noExitRuntime = true~. Under that setting ~exit()~ takes this
+path in ~lox.js~:
+
+#+begin_example
+  exit → exitJS → err("program exited (with status: 70), but
+                       keepRuntimeAlive() is set ...")
+               → _proc_exit → quit_(code, new ExitStatus(code)) → throw
+#+end_example
+
+So a typo in the editor throws out of ~runSource~ exactly like a segfault would.
+
+** Nothing catches it
+
+~runSource~ is a synchronous ~cwrap~ call with no ~try~ at either call site in
+~app/src/lox-visualizer/lox-visualizer.ts~:
+
+- ~setUp()~ — ~lox.exports.runSource(this.getText())~
+- ~rerun()~ — ~this.lox.exports.runSource(text)~
+
+Everything after the call in that function is skipped.
+
+** Consequences
+
+| Symptom | Cause |
+|---------+-------|
+| Build button permanently disabled | ~root.dataset.running~ set before the call, ~delete~-d after; the delete never runs. ~static/css/lox-visualizer.css~ ~[data-running] .lox-run-button~ applies ~opacity: .5; pointer-events: none~ and a ~…~ suffix. Only a page reload recovers. |
+| Bytecode-exec arrow, stack and playback panels blank | ~executionStore.set({steps, prints, currentStep})~ is skipped. ~rerun()~ already cleared the store, so the buffered steps in ~this.stepBuffer~ are simply never published. |
+| MAX_STEPS "may have an infinite loop" warning never shown | Same skipped block. |
+| First-load failure also kills responsive layout, connectors and deselect | A throw in ~setUp()~ skips ~observeViewport~, the ~visualViewport~ keyboard handling, the touch swipe handlers, the ~resize~/~scroll~ connector refresh, and ~documentClickHandler~. Connector lines then drift on scroll and never re-measure. |
+| The failure is silent | Entry point is ~void app.setUp()~ — an unhandled rejection, visible only in devtools. |
+| Emscripten internals shown to readers | ~err~ is bound to our ~printErr~, so the ~"program exited (with status: 70), but keepRuntimeAlive() is set (counter=0) due to an async operation…"~ warning, and ~"stdio streams had content in them that was not flushed"~, are rendered as error lines in the console panel alongside clox's real message. |
+| Infinite loop freezes the whole tab | ~runSource~ blocks the main thread. ~MAX_STEPS~ (10,000) only caps step-buffer memory; it cannot stop execution. |
+
+The page ends up looking half-alive: lexer and AST panels keep whatever the
+in-run ~requestAnimationFrame~ renders produced, while the run controls and
+execution panels are dead.
+
+** Failure taxonomy
+
+Three cases that need different handling, currently indistinguishable:
+
+1. *Program error* — compile or runtime error in the user's Lox. Expected,
+   recoverable, message already on stderr. Should not be an exception at all.
+2. *Fatal trap* — C stack overflow from deep Lox recursion, OOB write, malloc
+   failure. Goes through ~abort()~, throws ~WebAssembly.RuntimeError~ and sets
+   ~ABORT = true~. The module instance is dead; re-running cannot work.
+3. *Non-termination* — no exception, just a hung main thread.
+
+* Goals
+
+- A program error never disables the Build button and never loses the trace
+  collected up to the failure point.
+- A fatal trap is reported as such, with the Build button disabled *visibly and
+  with a reason* rather than silently stuck mid-run.
+- Emscripten's internal diagnostics stay out of the reader-facing panels.
+- A runaway program does not require killing the tab.
+
+** Non-goals
+
+- Recovering execution after a fatal trap without a reload (would need module
+  re-instantiation; see Phase 4 notes).
+- Changing how errors are *laid out* — that is ~design.org~'s Errors pane.
+
+* Phase 0 — Stop the bleeding (TypeScript only)
+
+No C changes, no coordination with the Errors pane work. Land this first.
+
+Extract the two call sites into one helper on ~LoxVisualizer~:
+
+#+begin_src typescript
+  /** Run the module and publish whatever we collected, crash or not. */
+  private runAndPublish(text: string): void {
+      this.root.dataset.running = '';
+      try {
+          this.lox.exports.runSource(text);
+      } catch (e) {
+          this.reportRunFailure(e);
+      } finally {
+          delete this.root.dataset.running;
+          this.executionStore.set({
+              steps: this.stepBuffer,
+              prints: this.printBuffer,
+              currentStep: this.stepBuffer.length > 0 ? 0 : null,
+          });
+          if (this.stepBuffer.length >= MAX_STEPS) { /* existing cap message */ }
+          // The run may have died before lexer EOF / parser PROGRAM_CLOSE, so
+          // the rAF render was never scheduled. Guarantee one render.
+          if (!this.rendered) {
+              this.rendered = true;
+              this.render();
+          }
+      }
+  }
+#+end_src
+
+Then ~setUp()~ and ~rerun()~ both call ~this.runAndPublish(text)~, and the
+duplicated ~dataset.running~ / ~executionStore.set~ / MAX_STEPS blocks in each
+are deleted (they are currently copy-pasted between the two).
+
+Additionally in ~setUp()~: move ~runAndPublish~ *after* the listener and
+observer registrations that currently follow it (viewport, visualViewport,
+touch, resize/scroll, document click), so a first-load failure cannot take the
+app's event wiring down with it. Nothing in that block depends on the run
+having happened.
+
+Also change the entry point from ~void app.setUp()~ to a catch that logs and
+leaves a visible message, so a setup failure is not silent.
+
+Deliverable: an error in the editor leaves the visualizer fully usable — panels
+populated up to the failure, Build button live, fix-and-rerun works.
+
+* Phase 1 — Stop treating program errors as exceptions (C)
+
+In ~clox/src/main_wasm.c~, drop both ~exit()~ calls:
+
+#+begin_src c
+  EMSCRIPTEN_KEEPALIVE
+  void runSource(const char* source) {
+    initVM();
+    interpret(source);   // errors already reported on stderr
+  }
+#+end_src
+
+The exit status carried no information the frontend used — the human-readable
+message is already emitted by ~runtimeError~ / the compiler's error reporting,
+which reach ~printErr~ before the exit. With this change, cases (1) and (2) in
+the taxonomy become distinguishable: only a *real* trap throws.
+
+Consider also returning the ~InterpretResult~ as an ~int~ so the frontend can
+distinguish "compiled and ran clean" from "compile error" from "runtime error"
+without string-matching stderr. That is a signature change to the ~cwrap~ call
+in ~lox-core.ts~ (~'void'~ → ~'number'~) and is worth doing while the file is
+open — the Errors pane in ~design.org~ can use it to pick a heading.
+
+Rebuild via ~make wasm~ in the project ~Makefile~ — it runs ~make -C
+$(LOX_PROJECT) wasm~ and copies ~lox.js~ + ~lox.wasm~ into
+~static/js/lox-visualizer/~; Hugo then republishes them to ~public/js/~.
+
+Gotcha: there is a *third* copy of the glue at ~app/src/lox-visualizer/lox.js~
+that ~make wasm~ does not touch, and it is already stale (March, and it differs
+from the ~static/~ copy). It is not what executes — ~lox-core.ts~ dynamically
+imports the absolute URL ~/js/lox-visualizer/lox.js~, i.e. the served copy. While
+in here, either delete the ~app/src/~ copy or add it to the ~wasm~ target's copy
+list, so the next person reading it is not reading a build from a different
+month.
+
+* Phase 2 — Handle fatal traps honestly
+
+After Phase 1, a throw out of ~runSource~ means the module is unusable
+(~ABORT = true~; the glue's ~assert(runtimeInitialized)~ and the trapped memory
+make further calls meaningless).
+
+~reportRunFailure(e)~ should:
+
+- Push a reader-facing message: "The interpreter crashed and cannot continue.
+  Reload the page to try again." — plus the underlying message for the curious.
+  ~e~ is a ~WebAssembly.RuntimeError~ for a trap; keep the raw text but do not
+  lead with it.
+- Set a distinct root flag, e.g. ~root.dataset.crashed = ''~, separate from
+  ~data-running~.
+- CSS: ~[data-crashed] .lox-run-button~ disabled with a "crashed — reload"
+  label, so the disabled state reads as deliberate rather than as a run that
+  never finished.
+
+Once Phase 1 lands, this path should be genuinely rare, which is the point —
+today it fires on every typo.
+
+* Phase 3 — Keep Emscripten internals out of the panels
+
+~printErr~ in ~lox-core.ts~ currently forwards everything to the ~stderr~ event.
+Filter the glue's own diagnostics before they reach the store:
+
+- ~"program exited (with status: …), but keepRuntimeAlive() is set"~
+- ~"stdio streams had content in them that was not flushed"~
+- ~"Aborted(…)"~ (already surfaced via Phase 2's message)
+
+Log those to ~console.error~ only. A prefix/substring denylist is adequate;
+these strings are stable across Emscripten versions and Phase 1 removes the
+first one's trigger anyway.
+
+Separately: the wasm build is an ASSERTIONS build (the glue is full of
+~assert()~ and the unflushed-content check). Building the shipped artifact with
+~-O2 -sASSERTIONS=0~ would shrink it and remove this class of noise; keep a
+debug build for local work. Optional, but the same Makefile edit.
+
+* Phase 4 — Non-termination
+
+Two options, cheap first:
+
+** 4a. Step budget in the C dispatch loop
+
+Add a counter in the VM's dispatch loop; past a large budget (10M, say — well
+above any sample program, well below a tab freeze), report a runtime error
+("execution exceeded N instructions — possible infinite loop") and return
+~INTERPRET_RUNTIME_ERROR~. With Phase 1 in place this surfaces as an ordinary
+error and the visualizer stays interactive.
+
+This does not bound wall-clock time precisely, but it converts a hang into a
+message, which is the whole ask. Note this is distinct from the frontend's
+~MAX_STEPS = 10_000~, which only caps how many ~vm_step~ events are buffered.
+
+** 4b. Move the module into a Web Worker (deferred)
+
+The real fix: ~runSource~ off the main thread, events posted back, a hung run
+terminable via ~worker.terminate()~ with a "Stop" button. Also makes fatal-trap
+recovery possible — spawn a fresh worker instead of asking for a reload.
+
+Substantial: the event stream (~stdout~/~print~/~lexer~/~parser~/~compiler~/
+~vm_step~) becomes async, so ~setUp~/~rerun~ become genuinely asynchronous and
+the render scheduling changes. Not worth starting until 0–3 are in. Worth
+keeping in mind if the Python visualizer's Pyodide path is ever moved to a
+worker for the same reason — they would share the harness.
+
+* Relationship to design.org
+
+~design.org~ routes errors into a new ~ErrorStore~ + Errors pane and includes a
+~private runSource()~ helper with try/catch. This plan supersedes that helper
+(Phase 0's version also restores ~data-running~ and publishes the step buffer,
+which the earlier sketch does not) and adds the C-side and trap-vs-error work
+the earlier document did not know about.
+
+Order: Phase 0 first, standalone. The Errors pane can then land on top —
+~reportRunFailure~ becomes a push to ~errorStore~ instead of ~consoleMessages~,
+which is a one-line change inside an already-correct control flow.
+
+* Tests
+
+Vitest already covers the panels; these are mostly orchestrator-level.
+
+- Unit: a fake ~lox.exports.runSource~ that throws — assert ~data-running~ is
+  removed, ~executionStore~ receives the buffered steps, ~render()~ ran once.
+- Unit: same, throwing *before* any lexer event — assert one render still
+  happened and panels show an empty-but-valid state.
+- Unit: ~printErr~ filter drops the known glue strings and keeps clox output.
+- Manual smoke, after a rebuild:
+  - ~var x = ;~ → error shown, Build button live, editing and re-running works.
+  - Deep recursion (~fun f() { f(); } f();~) → crash message, Build disabled
+    with a reason, no silent spinner.
+  - ~while (true) {}~ → step-budget message rather than a frozen tab (Phase 4a).
+  - Valid program → unchanged behaviour, full trace, no stray error lines.
+
+* Files touched
+
+| Phase | Files |
+|-------+-------|
+| 0 | ~app/src/lox-visualizer/lox-visualizer.ts~ |
+| 1 | ~clox/src/main_wasm.c~, ~app/src/lox-visualizer/lox-core.ts~, rebuilt ~lox.js~/~lox.wasm~ (app + ~static/js/~ + ~public/js/~) |
+| 2 | ~lox-visualizer.ts~, ~static/css/lox-visualizer.css~ |
+| 3 | ~app/src/lox-visualizer/lox-core.ts~, clox ~Makefile~ (~WASM_FLAGS~) |
+| 4a | clox VM dispatch loop |
+| 4b | new worker harness; ~lox-core.ts~, ~lox-visualizer.ts~ |

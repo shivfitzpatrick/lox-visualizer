@@ -1,0 +1,99 @@
+/* Page chrome for the standalone visualizer: the dark palette, fonts and
+   container that the visualizer's own stylesheet assumes it is sitting on.
+   The visualizer itself is styled by lox-visualizer.css. */
+
+@font-face {
+    font-family: 'Barlow';
+    src: url('/font/Barlow-Medium.ttf') format('truetype');
+    font-display: swap;
+}
+
+@font-face {
+    font-family: 'JetBrains Mono';
+    src: url('/font/JetBrainsMono-Medium.woff2') format('woff2');
+    font-display: swap;
+}
+
+:root {
+    --darkest-color: #242930;
+    --dark-color: #353b43;
+    --light-color: #afbac4;
+    --lightest-color: #ffffff;
+    --primary-color: #57cc8a;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    font-family: 'Barlow', sans-serif;
+    background: var(--dark-color);
+    color: var(--light-color);
+}
+
+code,
+pre,
+pre code,
+tt,
+kbd,
+samp {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1em;
+}
+
+a {
+    color: var(--primary-color);
+}
+
+h1,
+h2,
+h3 {
+    color: var(--lightest-color);
+}
+
+/* Wide enough for the panel row to lay all panes out side by side; the
+   visualizer wraps them into a column on its own once it runs out of room. */
+.page {
+    max-width: 100rem;
+    padding: 2.5rem;
+}
+
+.page-header {
+    margin-bottom: 1.75em;
+}
+
+.page-title {
+    margin: 0 0 0.5em;
+    font-size: 1.75em;
+    font-weight: 600;
+}
+
+.page-lead,
+.page-note {
+    margin: 0;
+    max-width: 42em;
+    font-size: 1.05em;
+    line-height: 1.7;
+}
+
+.page-help {
+    max-width: 42em;
+    line-height: 1.7;
+}
+
+.page-help h2 {
+    font-size: 1.05em;
+    font-weight: 600;
+    margin-bottom: 0.5em;
+}
+
+.page-help ul {
+    margin: 0;
+    padding-left: 1.25em;
+}
+
+.page-note {
+    margin: 1.5em 0 1em;
+}

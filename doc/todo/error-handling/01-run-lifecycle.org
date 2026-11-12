@@ -1,0 +1,221 @@
+#+title: Run Lifecycle — Survive a Failed Run
+#+date: 2026-08-03
+#+phase: 0 (land first, standalone)
+#+TODO: TODO NEXT IN-PROGRESS WAITING | DONE CANCELLED
+
+Make ~LoxVisualizer~ survive an exception out of ~runSource~.  TypeScript only;
+no C changes and no dependency on the Errors pane work in ~design.org~.
+
+* Background
+
+~lox.exports.runSource(text)~ is a synchronous ~cwrap~ call with no ~try~ at
+either call site — ~setUp()~ and ~rerun()~.  Everything after the call in that
+function is skipped when it throws, and today it throws on *any* Lox compile or
+runtime error, not just a crash (see ~crash-resilience.org~).
+
+What gets skipped:
+
+- ~delete this.root.dataset.running~ → Build button stuck disabled forever
+  (~[data-running] .lox-run-button~ sets ~pointer-events: none~)
+- ~executionStore.set({steps, prints, currentStep})~ → stack / playback /
+  bytecode-arrow panels blank, though ~this.stepBuffer~ holds the trace
+- the MAX_STEPS cap warning
+- in ~setUp()~ only: ~observeViewport~, ~visualViewport~ keyboard handling, touch
+  swipe handlers, ~resize~/~scroll~ connector refresh, ~documentClickHandler~
+
+Note the two call sites currently duplicate the ~dataset.running~ /
+~executionStore.set~ / MAX_STEPS blocks verbatim.  Extracting the helper removes
+that duplication as a side effect.
+
+* Tasks
+
+** DONE Extract ~runAndPublish~ helper
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+One private method owning the whole run lifecycle: set the running flag, call
+the module, publish results no matter what.
+
+#+begin_src typescript
+  private runAndPublish(text: string): void {
+      this.root.dataset.running = '';
+      try {
+          this.lox.exports.runSource(text);
+      } catch (e) {
+          this.reportRunFailure(e);
+      } finally {
+          delete this.root.dataset.running;
+          this.executionStore.set({
+              steps: this.stepBuffer,
+              prints: this.printBuffer,
+              currentStep: this.stepBuffer.length > 0 ? 0 : null,
+          });
+          if (this.stepBuffer.length >= MAX_STEPS) {
+              this.loxState.push('consoleMessages', {
+                  type: 'error',
+                  text: `Execution trace capped at ${MAX_STEPS.toLocaleString()} steps — program may have an infinite loop.`,
+              });
+              this.publishConsole();
+          }
+          // The run may have died before lexer EOF / parser PROGRAM_CLOSE, so
+          // the rAF render was never scheduled. Guarantee one render.
+          if (!this.rendered) {
+              this.rendered = true;
+              this.render();
+          }
+      }
+  }
+#+end_src
+
+Then delete the duplicated blocks from ~setUp()~ and ~rerun()~; both call
+~this.runAndPublish(text)~.
+
+Keep ~publishConsole()~ inside the ~finally~ — the stderr handler publishes
+incrementally during the run, but the cap message is appended after it.
+
+** DONE Add ~reportRunFailure~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+For now, a console message; stream 03 upgrades it to a distinct crash state and
+stream 02 makes it rare.
+
+#+begin_src typescript
+  private reportRunFailure(e: unknown): void {
+      const detail = e instanceof Error ? e.message : String(e);
+      console.error('lox-visualizer: run failed', e);
+      this.loxState.push('consoleMessages', { type: 'error', text: `Interpreter stopped: ${detail}` });
+      this.publishConsole();
+  }
+#+end_src
+
+~ExitStatus~ is not an ~Error~ subclass in the Emscripten glue, so the
+~String(e)~ branch matters — do not assume ~e.message~ exists.
+
+** DONE Reorder ~setUp~ so a failed first run cannot unwire the app
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+Move ~runAndPublish~ to the *end* of ~setUp()~, after ~observeViewport~, the
+~visualViewport~ block, the touch listeners, and the ~resize~/~scroll~/~click~
+registrations.  Nothing in that block depends on the run having happened —
+~observeViewport~ reads layout, the rest only register handlers.
+
+Consequence: a first-load crash still leaves responsive layout, connector
+re-measurement and click-to-deselect working.
+
+** DONE Catch at the entry point
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+The module tail is ~void app.setUp()~ — a setup failure is an unhandled
+rejection, silent outside devtools.  Replace with a catch that logs.  A failure
+here (WASM fetch 404, instantiation error) happens before any panel exists, so
+there is nowhere good to render a message yet; logging plus leaving the
+un-replaced ~<pre>~ visible is acceptable for now.  Note it for stream 03.
+
+** DONE Unit tests
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/*.test.ts
+   :END:
+
+Drive ~LoxVisualizer~ with a fake ~lox~ whose ~exports.runSource~ throws.
+
+- throws after emitting lexer + vm_step events → ~data-running~ removed,
+  ~executionStore.steps~ holds the buffered steps, ~currentStep === 0~
+- throws before *any* event → exactly one ~render()~, panels in a valid empty
+  state, ~data-running~ removed
+- throws a non-~Error~ (mimic ~ExitStatus~: ~{name:'ExitStatus', status:70}~) →
+  no secondary ~TypeError~ from ~reportRunFailure~
+- successful run → unchanged behaviour (regression guard on the extraction)
+
+Mocking note: ~createLox~ is imported at module scope and the module
+self-instantiates on import (~const app = LoxVisualizer.fromPage()~).  Existing
+tests work around this — check how ~mount.test.ts~ and ~slots.test.ts~ set up
+the DOM before following a different path.  If the self-instantiation makes the
+orchestrator untestable, extracting the bootstrap into an exported function is
+in scope for this stream.
+
+* Done when
+
+An error in the editor leaves the visualizer fully usable: message shown, trace
+visible up to the failure, Build button live, fix-and-rerun works without a
+page reload.
+
+* Outcome (2026-08-03)
+
+Landed.  ~make typecheck~ clean; the five new tests in
+~app/src/lox-visualizer/lox-visualizer.test.ts~ pass.  Still unverified in a
+real browser — see "Remaining" below.
+
+Deviations from the plan above, and why:
+
+** ~describeThrown~ helper instead of an inline ~String(e)~
+
+The sketch's ~e instanceof Error ? e.message : String(e)~ is wrong for the case
+it was written for.  Emscripten's ~ExitStatus~ is a plain class carrying
+~message~ and ~status~ — not an ~Error~ — so ~String(e)~ yields
+~"[object Object]"~ and the reader learns nothing.  ~describeThrown~ reads
+~message~ off any object that has one, falling back to ~String~.  There is a
+test pinning this.
+
+** Bootstrap extracted to ~main.ts~
+
+Taken up as in the note under "Unit tests": the orchestrator self-instantiated
+on import, so *any* test importing it mounted a visualizer as a side effect.
+~lox-visualizer.ts~ now exports ~LoxVisualizer~ and is side-effect free; the
+bootstrap lives in ~app/src/lox-visualizer/main.ts~.
+
+The Vite input *key* still reads ~lox-visualizer/lox-visualizer~, so the built
+file and the URL in posts (~/app/lox-visualizer/lox-visualizer.js~) are
+unchanged — only the source path behind it moved.  Verified with a one-shot
+build: the entry contains the class and the bootstrap.
+
+~python-visualizer.ts~ has the same self-mounting shape and was left alone.
+Worth the same treatment when it next needs tests.
+
+** ~tsconfig.test.json~ created
+
+~make typecheck~ referenced it, but it was never committed — the target failed
+for everyone with ~TS5058: The specified path does not exist~.  It now extends
+the app config with ~types: ["vitest/globals"]~ and ~exclude: []~.  ~exclude~
+must be cleared rather than the include narrowed to ~*.test.ts~, or ambient
+declarations (~app/src/types/pyodide.d.ts~, which declares ~*.py?raw~) fall out
+of the test project and ~py-core.ts~ fails to resolve its emitter import.
+
+** Tests mount a layout without the AST panel
+
+~drawAst~ drives d3-zoom, which reads SVG geometry (~width.baseVal~) that jsdom
+does not implement, and it reads ~prefers-reduced-motion~ via ~matchMedia~,
+which jsdom also lacks.  ~fromPage~ already accepts a layout, so the tests pass
+~[['editor','lexer'],['bytecode','console']]~ rather than shimming the SVG DOM.
+~ResizeObserver~ and ~matchMedia~ still need stubbing for ~observeViewport~.
+
+Note this means the forced-render path is exercised without the AST panel
+attached.  If that panel ever gets its own jsdom shim, widen the test layout.
+
+* Remaining
+
+** TODO Restart ~make dev~ before trusting the browser
+   :PROPERTIES:
+   :files:    —
+   :END:
+
+~vite build --watch~ does not reload ~vite.config.js~, so a running ~make dev~
+keeps building the old entry and ~app/dist~ goes stale.  Restart it.
+
+** TODO Verify in a real browser
+   :PROPERTIES:
+   :files:    —
+   :END:
+
+The tests use a fake module; they prove the orchestrator's control flow, not
+that a real ~ExitStatus~ from the real WASM takes the path we think.  Load
+~/visualizers~, type ~var x = ;~, hit Build: expect an error message, a live
+Build button, and a working re-run.  That is the actual acceptance criterion for
+this stream, and it is also the cheapest confirmation of the ~exit()~ diagnosis
+that stream 02 acts on.

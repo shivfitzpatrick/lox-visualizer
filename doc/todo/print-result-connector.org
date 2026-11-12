@@ -1,0 +1,409 @@
+#+title: Print Result → OP_PRINT Connector
+#+date: 2026-06-18
+#+TODO: TODO IN-PROGRESS | DONE
+
+Make each line in the console/print pane *selectable* and draw a connector
+between a printed result and the ~OP_PRINT~ instruction that produced it —
+mirroring the existing lexer↔AST↔bytecode selection model.
+
+Today the console is the one piece of the visualizer that sits *outside* the
+store/connector architecture: it is rendered inline in the orchestrator
+(~displayConsole~), its messages carry only ~text~, and clicking a line does
+nothing.  This work promotes it to a real ~ConsolePanel~ and gives each printed
+value the provenance it needs to join the shared selection model.
+
+* Background
+
+** How selection + connectors work today
+The whole visualizer keys cross-panel selection on a single source byte offset,
+~VisualizerSelection.selectedStart~ (~lox-data.ts~ 19–22).  Every selectable
+artifact carries that offset:
+
+- lexer spans → ~data-start~
+- AST nodes → ~AstNode.start~ / ~data-start~
+- bytecode rows → ~CompilerEvent.src_offset~ / ~data-src-offset~
+
+A click writes ~{ selectedStart }~ to the selection store; each panel reacts in
+~onSelectionChange~, highlights its matching element(s) and publishes a
+connector *anchor* via ~setAnchor(rect | null)~.  The connector topology is
+declared once in the orchestrator (~lox-visualizer.ts~ 80–81):
+
+#+begin_src typescript
+connectors.addLine('ast', 'lexer', colors.highlight);
+connectors.addLine('ast', 'bc',    colors.highlight);
+#+end_src
+
+Panels never talk to each other — only through the store and the anchors.  See
+~doc/todo/arch-refactor/00-overview.org~ for the full design.
+
+** Why the join key already lines up for prints
+After the ~print~-keyword anchoring done in
+~doc/todo/instruction-ast-connector-fix.org~, the compiler stamps ~OP_PRINT~
+with the offset of the ~print~ keyword (~compiler.c~ ~printStatement~ 1147–1152:
+~setSrcOffset(start); emitByte(OP_PRINT)~).  That same value lands in the
+disassembly as ~OP_PRINT~'s ~src_offset~ (~debug.c jsonSimpleInstruction~ reads
+~chunk->srcOffsets[offset]~).  ~printStatement~ anchors *only* ~OP_PRINT~ to the
+~print~ keyword (the value expression gets its own anchors), so a single
+~src_offset~ identifies exactly the ~OP_PRINT~ row.
+
+The catch: that offset only lives on the *static disassembly*.  The runtime
+~print~ event the console consumes does not carry it.
+
+** What the print event carries today (the gap)
+~OP_PRINT~ executes in ~vm.c~ 435–439 and calls ~printValue(pop())~.  With
+~JSON_LOG_PRINT~ defined, ~printValue~ (~value.c~ 81–90) emits:
+
+#+begin_src json
+{"msg_type": "print", "text": "..."}
+#+end_src
+
+~printValue~ is a *generic* value printer (also used by the GC and the
+disassembler), so it has no access to the current chunk or instruction pointer
+and *cannot* know the ~src_offset~.  The frontend mirrors this: ~PrintEvent~
+(~events.ts~ 17–20) and ~ConsoleMessage~ (~state/state.ts~ 287–289) are
+~{ text }~ only, the orchestrator pushes them with no offset
+(~lox-visualizer.ts~ 98–104), and ~displayConsole~ (~lox-visualizer.ts~
+209–218) renders inert ~<div>~s with no ~data-*~, no click handler, no anchor.
+
+* Approach
+
+Two halves:
+
+1. *Provenance (C/WASM)* — emit the producing instruction's identity in the
+   ~print~ event: ~src_offset~ (the join key), plus ~chunk~ + ~offset~ for an
+   exact instruction match and future disambiguation.
+
+2. *Frontend* — thread that offset through ~PrintEvent~ → ~ConsoleMessage~,
+   promote the inline console to a ~ConsolePanel extends VisualizationPanel~
+   (~panelId = 'console'~) that makes print lines clickable (writing
+   ~selectedStart~) and reacts to selection (highlight + ~'console'~ anchor),
+   then declare a ~console↔bc~ connector.
+
+Because the console writes the *same* ~selectedStart~ the bytecode panel already
+keys on, clicking a printed line lights up its ~OP_PRINT~ row *for free* (and,
+via the existing ~ast↔bc~ / ~ast↔lexer~ lines, the ~Print~ AST node and source
+tokens too — the whole chain).  No new selection field is required.
+
+** Dependency
+The core ~console↔OP_PRINT~ line works regardless of the connector-fix WASM
+rebuild: both the print event's ~src_offset~ and the disassembly row's
+~src_offset~ are read from the *same* ~chunk->srcOffsets[opOffset]~, so they
+agree by construction.  The *extended* chain to the AST/lexer only lands on the
+right ~Print~ node once ~instruction-ast-connector-fix.org~'s WASM rebuild is
+deployed.  Ship this feature's WASM rebuild together with that one.
+
+* Tasks
+
+** DONE Emit print provenance from the ~OP_PRINT~ handler
+   :PROPERTIES:
+   :files:    /home/siobhan/Code/learn/cs/crafting-interpreters/clox/src/lib/vm.c
+   :END:
+
+Move the JSON emission for prints out of the generic ~printValue~ and into the
+~OP_PRINT~ case, where the frame, chunk and instruction pointer are in scope, so
+the offset can be attached.  At the case body, ~frame->ip~ has already advanced
+past the (single-byte) ~OP_PRINT~ opcode via ~READ_BYTE()~, so the opcode
+offset is ~frame->ip - 1 - chunk.code~.
+
+#+begin_src c
+case OP_PRINT: {
+#ifdef JSON_LOG_PRINT
+  Chunk* chunk = &frame->closure->function->chunk;
+  size_t opOffset = (size_t)(frame->ip - 1 - chunk->code);
+  int srcOffset = chunk->srcOffsets[opOffset];
+  const char* chunkName = frame->closure->function->name != NULL
+      ? frame->closure->function->name->chars
+      : "<script>";
+  printf("{\"msg_type\": \"print\", \"text\": \"");
+  printJsonValueText(pop());
+  printf("\", \"chunk\": \"%s\", \"offset\": %zu, \"src_offset\": %d}",
+         chunkName, opOffset, srcOffset);
+#else
+  printValue(pop());
+  printf("\n");
+#endif
+  break;
+}
+#+end_src
+
+Notes / sub-decisions:
+- Use ~printJsonValueText~ (~value.c~) for the value text so the ~text~ field is
+  JSON-safe (see ~Escape print text for valid JSON~).
+- ~chunkName~ must match the disassembly's chunk label exactly — bare
+  ~<script>~ / ~fn->name->chars~ (see ~debug.c~ 228 and ~vm.c~ 573), *not* the
+  ~<fn ...>~ display form — so the frontend can match ~(chunk, offset)~ if it
+  wants to.
+- ~offset~ equals ~CompilerEvent.offset~ (the per-chunk byte offset of the
+  opcode), and ~src_offset~ equals ~CompilerEvent.src_offset~.
+
+** DONE Escape print text for valid JSON
+   :PROPERTIES:
+   :files:    /home/siobhan/Code/learn/cs/crafting-interpreters/clox/src/lib/value.c, value.h, debug.c
+   :END:
+
+~printJsonString(const char*)~ escapes ~"~, ~\~, common control chars (~\n~, ~\r~,
+~\t~, ~\b~, ~\f~), and other bytes below ~0x20~ as ~\uXXXX~.  ~printJsonValueText~
+mirrors ~_printValue~ but routes every user-provided string through the escaper
+(function names, class names, string values, etc.).  ~printValue~'s
+~JSON_LOG_PRINT~ branch now calls ~printJsonValueText~ instead of raw
+~_printValue~.  ~debug.c~'s ~printConstantJSON~ reuses ~printJsonString~ for
+string constants (replacing the partial quote/backslash-only loop).
+
+When the ~OP_PRINT~ handler is moved (~Emit print provenance~ task), call
+~printJsonValueText~ for the ~text~ field — not ~_printValue~.
+
+** DONE Rebuild WASM and deploy
+   :PROPERTIES:
+   :files:    /home/siobhan/Code/learn/cs/crafting-interpreters/clox/Makefile, static/js/lox-visualizer/lox.js, static/js/lox-visualizer/lox.wasm
+   :END:
+
+Confirm ~JSON_LOG_PRINT~ is enabled in the wasm build (~common.h~ 13 shows it
+commented out for native; the Makefile defines it for the wasm target — verify).
+Rebuild and copy artifacts where ~lox-core.ts~ loads them:
+
+#+begin_src sh
+cd /home/siobhan/Code/learn/cs/crafting-interpreters/clox
+make wasm
+cp bin/lox.js  /home/siobhan/Code/project/active/goodskynet/static/js/lox-visualizer/lox.js
+cp bin/lox.wasm /home/siobhan/Code/project/active/goodskynet/static/js/lox-visualizer/lox.wasm
+#+end_src
+
+Sanity-check a snippet (e.g. ~print 1 + 2;~) and confirm the stdout line is now
+~{"msg_type":"print","text":"3","chunk":"<script>","offset":N,"src_offset":M}~,
+and that ~M~ equals the ~src_offset~ of the ~OP_PRINT~ row in the matching
+~compiler~ event.  Ship alongside the ~instruction-ast-connector-fix.org~
+rebuild so the AST half of the chain lands too.
+
+** DONE Extend ~PrintEvent~ and ~ConsoleMessage~ with provenance
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/events.ts, app/src/lox-visualizer/state/state.ts
+   :END:
+
+Add the new fields the C side now emits.  Keep them optional so an old/native
+wasm without them still type-checks and renders (just not selectable).
+
+#+begin_src typescript
+// events.ts
+export interface PrintEvent {
+    msg_type: 'print';
+    text: string;
+    chunk?: string;
+    offset?: number;
+    src_offset?: number;
+}
+
+// state/state.ts
+export type ConsoleMessage =
+    | { type: 'print'; text: string; chunk?: string; offset?: number; srcOffset?: number }
+    | { type: 'error'; text: string };
+#+end_src
+
+Error messages stay provenance-free (and therefore non-selectable).
+
+** DONE Carry provenance when pushing print messages
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+In the ~print~ handler (~lox-visualizer.ts~ 98–100) copy the offset onto the
+console message:
+
+#+begin_src typescript
+lox.events.on('print', (event) => {
+    const e = event as PrintEvent;
+    this.loxState.push('consoleMessages', {
+        type: 'print', text: e.text,
+        chunk: e.chunk, offset: e.offset, srcOffset: e.src_offset,
+    });
+});
+#+end_src
+
+** DONE Create ~panels/console-panel.ts~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/panels/console-panel.ts (new)
+   :END:
+
+A ~ConsolePanel extends VisualizationPanel~, ~panelId = 'console'~, container
+~#lox-console~.  Mirror ~BytecodePanel~'s shape (render in ~onDataChange~ — or a
+console-specific update; see the render-path task — select/highlight in
+~onSelectionChange~, re-measure in ~refreshAnchor~, clean up in ~tearDown~).
+
+#+begin_src typescript
+export class ConsolePanel extends VisualizationPanel {
+    readonly panelId = 'console';
+    private selectedLines: HTMLElement[] = [];
+    onDataChange(/* or onConsoleChange */): void { /* render lines */ }
+    onSelectionChange(state: VisualizerSelection): void { /* highlight + anchor */ }
+    refreshAnchor(): void { /* re-measure first selected line */ }
+}
+#+end_src
+
+*** Render: clickable print lines
+Port ~displayConsole~ (~lox-visualizer.ts~ 209–218).  For each ~print~ message
+that has a ~srcOffset~, set ~data-src-offset~, mark it clickable
+(~cursor: pointer~), and on click write the store + stop propagation (so the
+document-level deselect handler, ~lox-visualizer.ts~ 56–58, does not fire):
+
+#+begin_src typescript
+.attr('data-src-offset', d => d.type === 'print' && d.srcOffset != null ? d.srcOffset : null)
+.classed('console-selectable', d => d.type === 'print' && d.srcOffset != null)
+.on('click', (event, d) => {
+    if (d.type !== 'print' || d.srcOffset == null) return;
+    event.stopPropagation();
+    this.selectionStore.set({ selectedStart: d.srcOffset, selectedAstNode: null });
+});
+#+end_src
+
+Writing ~selectedAstNode: null~ follows the same protocol as the lexer/bytecode
+panels — the AST panel resolves and writes the node back.
+
+*** ~onSelectionChange~: highlight + anchor
+Same structure as ~BytecodePanel.onSelectionChange~ (~bytecode-panel.ts~ 32–64):
+
+1. Clear previous line highlight.
+2. If ~selectedStart === null~ → ~setAnchor(null)~, return.
+3. Find lines via ~querySelectorAll('[data-src-offset="N"]')~.  None → clear +
+   ~setAnchor(null)~ (e.g. the selection came from a non-print construct, or
+   from an ~OP_PRINT~ that never executed).
+4. Add a ~console-selected~ class to each match, record them, and
+   ~setAnchor(lines[0].getBoundingClientRect())~ to feed the ~console↔bc~ line.
+
+A loop body re-executes one ~OP_PRINT~, so several console lines can share one
+~src_offset~ — highlight them all, anchor the first (see Decisions).
+
+*** ~refreshAnchor~ + ~tearDown~
+Re-publish the first selected line's rect on scroll/resize; on ~tearDown~ clear
+classes + anchor.  Copy the pattern from ~bytecode-panel.ts~ 66–82.
+
+** DONE Wire ~ConsolePanel~ into the orchestrator; retire inline console
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+- Construct the panel: ~new ConsolePanel(root.querySelector('#lox-console')!, …)~
+  and add it to both the ~super([...])~ children array and ~this.panels~
+  (~lox-visualizer.ts~ 65–77).
+- Declare the connector (see next task).
+- Remove the inline ~displayConsole~ method (209–218) and its three call sites
+  (166, 191, 206) *once* the panel's render path covers them — including the
+  error-only path (next task).
+
+** DONE Resolve the console render path (error-only timing)
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts, app/src/lox-visualizer/lox-data.ts (decision)
+   :END:
+
+Today ~displayConsole~ is called via ~requestAnimationFrame~ after *every*
+~runSource~ (~lox-visualizer.ts~ 166, 191), independent of ~render()~, precisely
+because a *compile error* produces console output without ever firing
+~TOKEN_EOF~ / ~PROGRAM_CLOSE~ — so ~render()~ (and thus a ~dataStore~ publish)
+never happens.  A ~ConsolePanel~ that only reacts to ~dataStore~ would miss that
+case.
+
+Recommended: give the console its own lightweight store so the orchestrator can
+publish messages on every run, preserving today's timing and the
+"orchestrator writes stores, panels read stores" invariant:
+
+#+begin_src typescript
+const consoleStore = createStore<{ messages: ConsoleMessage[] }>({ messages: [] });
+// after each runSource (replacing the displayConsole rAF):
+window.requestAnimationFrame(() =>
+    consoleStore.set({ messages: this.loxState.get('consoleMessages') }));
+#+end_src
+
+~ConsolePanel~ subscribes to ~consoleStore~ (render) + ~selectionStore~
+(highlight/anchor).  Since ~consoleMessages~ is currently part of ~LoxData~ but
+read by no panel (~lox-data.ts~ 11, 28), drop it from ~LoxData~ as part of this
+change.  (Alternative, if a third store is unwanted: keep it in ~LoxData~ and
+ensure the orchestrator publishes a snapshot even on compile errors — riskier,
+since ~deriveLoxData~ would run ~parse()~/~compile()~ on partial event streams.)
+
+** DONE Declare the ~console↔bc~ connector
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+Add to the topology block (~lox-visualizer.ts~ 80–81):
+
+#+begin_src typescript
+connectors.addLine('console', 'bc', colors.highlight);
+#+end_src
+
+When a print line is clicked, ~selectedStart~ is its ~src_offset~; the bytecode
+panel already anchors the matching ~OP_PRINT~ row, the console panel anchors the
+clicked line, and the layer draws the line between them.  The existing
+~ast↔bc~/~ast↔lexer~ lines fire too, so the printed value visibly chains
+result → ~OP_PRINT~ → ~Print~ node → source.
+
+Optional: also ~addLine('console', 'ast', colors.highlight)~ for a direct
+result→~Print~-node line.  Out of scope for the core ask; decide when
+implementing.
+
+** DONE Style selected / selectable console lines
+   :PROPERTIES:
+   :files:    static/css/lox-visualizer-demo.css
+   :END:
+
+The console box and ~.console-error~ already exist (CSS 70–89).  Add a pointer
+affordance for selectable print lines and a selected treatment consistent with
+~tr.bc-selected~ (CSS 138–140):
+
+#+begin_src css
+.console-selectable { cursor: pointer; }
+
+#lox-console .console-selected {
+    background: rgba(86, 181, 194, 0.22);
+    outline: 1px solid rgba(86, 181, 194, 0.55);
+    border-radius: 2px;
+}
+#+end_src
+
+** DONE Verify in the running visualizer
+   :PROPERTIES:
+   :files:    (manual)
+   :END:
+
+With the new wasm in place:
+
+- ~print 1 + 2;~ — click the ~3~ line → the ~OP_PRINT~ row highlights and a
+  connector lands on it (and, post connector-fix, on the ~Print~ AST node).
+- Reverse: click the ~OP_PRINT~ row → the corresponding console line highlights.
+- Loop (~for (var i = 0; i < 3; i = i + 1) print i;~) — three console lines all
+  map to the one ~OP_PRINT~; selecting any one highlights the row, selecting the
+  row highlights all three (anchor on the first).
+- Function chunk (~fun f() { print 1; } f();~) — the print line's ~chunk~ is the
+  function name and the row resolves inside that chunk's ~<details>~ (the
+  bytecode panel auto-opens it, ~bytecode-panel.ts~ 57).
+- Compile error — console still renders the error line (error-only path), which
+  is non-selectable.
+- Re-run + click-outside still clear selection (~lox-visualizer.ts~ 56–58,
+  184–192).
+
+* Decisions
+
+** Reuse ~selectedStart~ — no new selection field
+The console joins the existing model on ~src_offset~ (the ~print~ keyword
+offset).  This is the minimal change and gives the AST/lexer chain for free.
+~chunk~ + ~offset~ are carried for an exact ~(chunk, offset)~ instruction match
+and future disambiguation, but are not needed for v1 highlighting.
+
+** Loop ambiguity is accepted for v1
+A static ~OP_PRINT~ inside a loop produces N console lines that all share one
+~src_offset~.  Selecting one line highlights the single producing instruction
+(correct); selecting the instruction highlights all N lines and anchors the
+connector to the first.  Per-execution precision (a unique connector per
+iteration) would need a runtime execution index in the print event — e.g.
+~(chunk, offset, executionCount)~ — and a richer selection key.  Deferred; note
+it here so the ambiguity is a known, intentional limitation, not a bug.
+
+** Provenance lives on the print event, not inferred
+Matching console lines to instructions by program order or by text is
+unreliable (conditionals/loops reorder execution vs. static layout; duplicate
+values collide).  The offset is emitted from the VM at execution time, where it
+is unambiguous.
+
+** Console becomes a real panel
+Promoting the inline console to ~ConsolePanel~ also closes the explicit TODO in
+~doc/todo/arch-refactor/08-orchestrator-and-cleanup.org~ ("the console panel is
+intentionally still handled inline … not yet a real panel") and the
+~consoleMessages~-in-~LoxData~ open question in ~03-lox-data.org~.

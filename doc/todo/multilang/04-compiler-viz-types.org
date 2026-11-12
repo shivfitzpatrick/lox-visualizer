@@ -1,0 +1,113 @@
+#+title: Phase 2a — Create compiler-viz/types.ts
+#+date: 2026-06-18
+#+phase: 2a (gate for 05, 06, 07, 08)
+
+Create ~app/src/compiler-viz/~ and populate ~types.ts~ with the canonical
+language-neutral data contracts.  All subsequent Phase 2 streams depend on this
+file existing; nothing else in the codebase is changed here.
+
+* Background
+
+~VizData~, ~VizSelection~, ~Instruction~, and friends currently live in
+~lox-data.ts~.  That file will eventually shrink to Lox-only derivation logic;
+the shared *type contracts* move to ~compiler-viz/types.ts~ so every language
+adapter and every shared panel imports from one neutral location.
+
+~Lexeme~ is currently in ~state/state.ts~ with a Lox-specific ~type~ field.
+The shared form (design doc) drops that field and adds ~length~.
+
+* Tasks
+
+** DONE Create ~app/src/compiler-viz/types.ts~
+   :PROPERTIES:
+   :files: app/src/compiler-viz/types.ts (new)
+   :END:
+
+New file.  Export all language-neutral data types:
+
+#+begin_src typescript
+// Source-position convention: all start/srcOffset values are UTF-16 code unit
+// offsets into the editor document string (JavaScript String indexing).
+// Language adapters must flatten native spans to this convention before
+// publishing VizData.
+
+export interface Lexeme {
+    start: number;
+    length: number;
+    text: string;
+    category: TokenCategory | null;
+}
+
+export interface Instruction { /* as in lox-data.ts */ }
+
+export interface VizData {
+    lexemes: Lexeme[];
+    ast: AstNode;
+    chunks: Map<string, Instruction[]>;
+}
+
+export interface VizSelection {
+    selectedStart: number | null;
+    selectedAstNode: AstNode | null;
+}
+
+export type VizDataStore = Store<{ data: VizData | null }>;
+
+export type ConsoleStore = Store<{ messages: ConsoleMessage[] }>;
+#+end_src
+
+~TokenCategory~ stays imported from ~@/lox-visualizer/state/token~ for now
+(moving it is a Phase 2 non-goal per 03-token-category-map.org).
+
+~AstNode~ is imported from ~@/lox-visualizer/ast~ (moves to
+~@/compiler-viz/ast~ in 05, at which point this import updates).
+
+** DONE Re-export from ~lox-data.ts~ for backward compatibility
+   :PROPERTIES:
+   :files: app/src/lox-visualizer/lox-data.ts
+   :END:
+
+Replace the inline type definitions in ~lox-data.ts~ with re-exports from
+~compiler-viz/types.ts~.  Keep ~mapCompilerEvent~, ~mapCompilerChunks~,
+~deriveVizData~, ~deriveLoxData~, ~publishConsoleMessages~ in ~lox-data.ts~
+(Lox-specific derivation logic stays here).
+
+#+begin_src typescript
+export type {
+    VizData, VizSelection, VizDataStore, ConsoleStore, Instruction,
+} from '@/compiler-viz/types';
+// LoxData / LoxDataStore / VisualizerSelection deprecated aliases still
+// re-exported for backward compat.
+#+end_src
+
+** DONE Align ~Lexeme~ in ~state/state.ts~
+   :PROPERTIES:
+   :files: app/src/lox-visualizer/state/state.ts
+   :END:
+
+~LoxState.lex()~ currently returns ~Lexeme~ with a Lox-specific ~type~ field.
+Two options (pick one):
+
+- *Preferred*: extend the shared ~Lexeme~ with an optional ~type~ field in a
+  local interface, keep ~lex()~ return type as the extended form.  ~lox-data.ts~
+  strips ~type~ when building ~VizData.lexemes~.
+- *Simple*: add ~length~ to the existing ~Lexeme~ in ~state.ts~ and drop ~type~
+  in a follow-on (scope creep risk).
+
+Whichever path: ~lox-data.ts~'s ~deriveVizData~ must produce
+~compiler-viz/types.Lexeme[]~ (without ~type~, with ~length~).
+
+** DONE Vitest green
+   :PROPERTIES:
+   :files: (all test files)
+   :END:
+
+No behavior change; only type moves and re-exports.  All existing tests must
+pass after the re-export stub is wired.
+
+* Acceptance
+
+- ~app/src/compiler-viz/types.ts~ exists and exports the types above.
+- ~lox-data.ts~ imports types from ~compiler-viz/types.ts~ and re-exports.
+- No panel or test changes yet — those come in 05–08.
+- Vitest green; ~tsc --noEmit~ clean (if wired).

@@ -1,0 +1,193 @@
+#+title: VisualizationPanel Base Class
+#+date: 2026-06-18
+#+phase: 2a (after Phase 1 — blocks all panels in Phase 2b)
+
+The abstract base every panel extends.  It standardizes container chrome, store
+wiring, and lifecycle so panels become interchangeable.  Each panel subscribes
+to *both* stores — the selection store and the data store (see
+~00-overview.org~ → "Two stores") — so the orchestrator never fans out to panels
+manually; it just publishes to the stores.
+
+* Background
+
+~Component~ (~app/src/lib/component.ts~) gives ~children~ + ~setUp~/~tearDown~
+propagation but nothing else, and today nothing is ever placed in ~children~
+(~doc/lox-visualizer-architecture.org~ → "The Component children system is
+unused").  ~VisualizationPanel~ fills the gap: it sits between ~Component~ and
+each concrete panel.
+
+Depends on the *signatures* from Phase 1: ~Store~ (~lib/store.ts~),
+~VisualizerSelection~ + ~LoxData~ + ~LoxDataStore~ (~lox-data.ts~),
+~ConnectorLayer~ (~connector-layer.ts~).
+
+* Target shape
+
+#+begin_src typescript
+abstract class VisualizationPanel extends Component {
+    abstract readonly panelId: string;
+
+    constructor(
+        protected container: HTMLElement,
+        protected dataStore: LoxDataStore,                 // Store<{ data: LoxData | null }>
+        protected selectionStore: Store<VisualizerSelection>,
+        protected connectors: ConnectorLayer,
+    ) {
+        super();
+    }
+
+    setUp() {
+        this.renderContainer();
+
+        // Subscribe to both stores...
+        this.unsubData = this.dataStore.subscribe(s => {
+            if (s.data) this.onDataChange(s.data);
+        });
+        this.unsubSelection = this.selectionStore.subscribe(s => this.onSelectionChange(s));
+
+        // ...then prime from current state, since data may have arrived before
+        // this panel mounted (a late subscriber would otherwise miss it).
+        const d = this.dataStore.get().data;
+        if (d) this.onDataChange(d);
+        this.onSelectionChange(this.selectionStore.get());
+
+        super.setUp();
+    }
+
+    tearDown() {
+        this.unsubData?.();
+        this.unsubSelection?.();
+        super.tearDown();
+    }
+
+    abstract onSelectionChange(state: VisualizerSelection): void;
+    abstract onDataChange(data: LoxData): void;
+
+    private renderContainer() { /* shared border/chrome */ }
+    private unsubData?: () => void;
+    private unsubSelection?: () => void;
+}
+#+end_src
+
+Note the *priming* step: ~store.subscribe~ only delivers *future* changes, so
+the base reads ~get()~ once after subscribing.  This is the concrete reason the
+store (with a current value) is used instead of a bare event dispatcher — see
+~00-overview.org~ → "State management".  ~onDataChange~ is only invoked when
+~data~ is non-null; the initial ~{ data: null }~ is skipped.
+
+* Tasks
+
+** DONE Resolve the Component lifecycle contract
+   :PROPERTIES:
+   :files:    app/src/lib/component.ts, app/src/lox-visualizer/visualization-panel.ts (new)
+   :END:
+
+⚠ *Breaking-change hazard — backward-compatibility gated.*  ~lib/component.ts~
+is imported by the still-live ~lox-visualizer-demo.ts~, which relies on the
+constructor auto-calling ~setUp()~ (bare ~new LoxVisualizer()~, demo line 322).
+Editing ~component.ts~ here, before 08 removes the demo, breaks the running
+site.  See ~00-overview.org~ → "Breaking changes and safe sequencing".
+
+This must be decided first because it shapes the constructor.  ~Component~'s
+constructor calls ~this.setUp()~ (component.ts line 7).  If a panel extends
+~Component~ and is later also placed in the orchestrator's ~children~, ~setUp~
+would run twice (panel's own ~new~, then parent's ~super.setUp()~ propagation).
+
+Pick one and document it for ~08-orchestrator-and-cleanup.org~:
+
+1. *Decouple construction from setUp* (recommended end-state): change
+   ~Component~'s constructor to *not* call ~setUp()~, and make the top-level
+   ~LoxVisualizer~ call ~setUp()~ explicitly (it already does, via
+   ~Component.prototype.setUp.apply~).  Cleanest, but verify no other
+   ~Component~ subclass relies on constructor-time ~setUp~ (search: only the
+   visualizer uses ~Component~ today).
+2. *Idempotent setUp*: guard ~VisualizationPanel.setUp~ with a
+   ~this.didSetUp~ flag so a second call is a no-op.  Less invasive but leaves
+   the double-call smell.
+
+Option 1 is the preferred *end-state* and is assumed by the rest of these tasks.
+
+*How to land it without breaking ~main~* — choose one:
+
+- *Backward-compatible now*: keep the constructor ~setUp()~ call intact for now;
+  build ~VisualizationPanel~ around option 2 (idempotent ~setUp~) so panels are
+  safe whether constructed standalone or via ~children~.  Flip ~component.ts~ to
+  option 1 (drop the constructor call) *during 08*, in the same commit that
+  replaces the demo.
+- *Defer*: don't touch ~component.ts~ in this stream at all; create
+  ~visualization-panel.ts~ only, and move the ~component.ts~ edit into 08.
+
+Whichever you pick, the actual ~component.ts~ constructor change must land *with
+or after* 08, never before.  ~visualization-panel.ts~ itself is a new file and
+can be created freely.
+
+** DONE Create ~visualization-panel.ts~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/visualization-panel.ts (new)
+   :END:
+
+Implement the abstract class above.  Constructor stores ~container~,
+~dataStore~, ~selectionStore~, ~connectors~ as ~protected~.  ~setUp~ renders
+container chrome, subscribes to *both* stores, primes from their ~get()~
+(invoking ~onDataChange~ only when ~data~ is non-null), then propagates via
+~super.setUp()~.  ~tearDown~ unsubscribes both then propagates.
+
+Concrete panels implement:
+- ~onSelectionChange(state)~ — react to selection-store changes; after updating
+  DOM, call ~this.connectors.setAnchor(this.panelId, rect | null)~.
+- ~onDataChange(data)~ — (re-)render from a fresh ~LoxData~ snapshot delivered by
+  the data store.
+
+Panels that write selection do so via ~this.selectionStore.set({ ... })~ (the
+data store is read-only from a panel's perspective — only the orchestrator
+writes it).
+
+** DONE Implement shared container chrome in ~renderContainer~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/visualization-panel.ts
+   :END:
+
+Centralize the border / border-radius / padding currently applied per-panel via
+CSS (the post's ~.code-block~ class and ~#lox-ast svg~ styling — see
+~static/css/lox-visualizer-demo.css~).  The architecture says the white border,
+padding, and border-radius are "things all panels share".
+
+Keep it minimal and CSS-driven: ~renderContainer~ should ensure the container
+has the shared class (e.g. add ~'code-block'~ or a new ~'lox-panel'~ class)
+rather than inlining styles, so the existing CSS keeps working unchanged
+(~doc/lox-visualizer-architecture.org~ → "The CSS and HTML structure ... do not
+need to change").  Avoid clobbering panel-specific markup the renderers create.
+
+** DONE Provide a tiny anchor helper (optional but recommended)
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/visualization-panel.ts
+   :END:
+
+Add a protected convenience so panels don't repeat the null-handling:
+
+#+begin_src typescript
+protected setAnchor(rect: DOMRect | null) {
+    this.connectors.setAnchor(this.panelId, rect);
+}
+#+end_src
+
+* Open questions
+
+- Should ~onDataChange~ also clear the current selection/anchor?  Today
+  ~render()~ wipes highlights and connectors before redrawing
+  (demo ~render()~ lines 272–274).  Preferred: the orchestrator resets the
+  selection store to ~{ selectedStart: null, selectedAstNode: null }~ right
+  before publishing new data to the data store, so every panel's
+  ~onSelectionChange~ clears in the same pass.  Decide whether that reset lives
+  in the orchestrator (preferred) or in each panel's ~onDataChange~.
+- *Subscriber ordering across two stores*: a panel primes ~onDataChange~ then
+  ~onSelectionChange~ in ~setUp~; at runtime the orchestrator publishes data
+  (after resetting selection).  Confirm this ordering can't leave a panel
+  anchoring to stale geometry — the selection reset clears anchors before the
+  data re-render replaces the DOM.
+- Does ~VisualizationPanel~ need an ~onResize~/~refresh~ hook so panels can
+  re-measure and re-publish anchors (connector rects go stale on scroll/pan)?
+  See ~02-connector-layer.org~ open questions; if yes, add an abstract/overridable
+  ~refreshAnchor()~ here.
+- ~container~ typing: the orchestrator currently selects ~#lox-lexer~,
+  ~#lox-ast~, ~#lox-compiler~ via ~d3.select~ / ~querySelector~.  Base takes a
+  raw ~HTMLElement~; panels that use d3 can wrap with ~select(this.container)~.

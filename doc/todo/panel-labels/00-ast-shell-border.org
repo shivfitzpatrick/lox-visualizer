@@ -1,0 +1,47 @@
+#+title: AST Panel Shell Border
+#+date: 2026-06-19
+#+phase: prerequisite (before panel labels)
+
+Move the AST pane chrome from the inner ~svg~ to ~.lox-panel--ast~ so it
+matches lexer, bytecode, stack, and console.  Panel labels (03) sit above the
+shell border box — inconsistent AST chrome would misalign the "Parser" label.
+
+* Background
+
+Historically the white rounded border lived on ~.lox-panel--ast svg~ while other
+panels bordered their shell ~div~.  After the layout refactor (~arch-refactor/12~)
+the class moved from ~#lox-ast svg~ to ~.lox-panel--ast svg~ but the split
+remained.
+
+* Tasks
+
+** DONE Add ~.lox-panel--ast~ to shared chrome selector
+   :PROPERTIES:
+   :files:    static/css/lox-visualizer.css
+   :END:
+
+Include ~.lox-panel--ast~ in the grouped rule with ~.lox-panel--lexer~,
+~.lox-panel--bytecode~, etc.:
+
+#+begin_src css
+.lox-panel--lexer,
+.lox-panel--ast,
+.lox-panel--console,
+…
+#+end_src
+
+** DONE Strip border from inner ~svg~
+   :PROPERTIES:
+   :files:    static/css/lox-visualizer.css
+   :END:
+
+Keep sizing rules on ~.lox-panel--ast svg~ (~display: block~, ~width: 100%~,
+~max-width: 100%~, ~box-sizing~).  Remove ~border~ and ~border-radius~.
+
+No changes to ~drawAst~ or ~AstPanel~ — the SVG still fills the padded shell.
+
+* Acceptance
+
+- AST pane shows the same white 2px / 20px-radius border as lexer and bytecode.
+- SVG tree renders inside the padded shell; pan/zoom and node highlights unchanged.
+- No double border (shell only, not svg).

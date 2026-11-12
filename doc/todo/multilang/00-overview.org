@@ -1,0 +1,75 @@
+#+title: Multi-Language Visualizer — Phase 1 Overview
+#+date: 2026-06-18
+
+This directory breaks [[file:design-doc.org][design-doc.org]] Phase 1 into
+independent work streams.  Each numbered file is a *sequence* of tasks meant to
+be done in order by one person/agent.  Streams *01* and *03* touch disjoint
+files and can run fully in parallel.  Stream *02* should start once *01*'s
+~VizData~ / ~VizSelection~ names are merged (both may edit ~lox-data.ts~ — see
+below).
+
+* Gate
+
+Arch-refactor Phase 4 (~doc/todo/arch-refactor/13–14~) must be complete before
+starting.  Phase 1 is *additive*: no file moves, no blog post changes, cloxvis
+behavior unchanged.
+
+* Goal
+
+Introduce language-neutral type names and boundaries *in place* under
+~app/src/lox-visualizer/~.  Panels and renderers consume ~VizData~ /
+~VizSelection~ and ~Instruction~ instead of Lox-specific event types.  Lox names
+remain as deprecated aliases until Phase 2 moves files into ~compiler-viz/~.
+
+* Phase 1 streams (parallel)
+
+| Stream | File | Primary files | Outcome |
+|--------+------+---------------+---------|
+| A | [[file:01-viz-data-types.org][01-viz-data-types.org]] | ~lox-data.ts~, panel type imports | ~VizData~, ~VizSelection~, store aliases, offset convention |
+| B | [[file:02-instruction-type.org][02-instruction-type.org]] | ~lox-data.ts~, ~bytecode.ts~, ~bytecode-panel.ts~ | ~Instruction~ in snapshot; panels drop ~events.ts~ |
+| C | [[file:03-token-category-map.org][03-token-category-map.org]] | ~token-map.ts~ (new), ~state/state.ts~, ~lexer-panel.ts~, ~layout.ts~ | Injectable ~TokenCategoryMap~; Lox map extracted |
+
+* Dependency graph
+
+#+begin_example
+arch-refactor 13–14 (gate)
+        │
+        ├─→ 01-viz-data-types ──┐
+        │                       ├──→ Phase 2 (extract compiler-viz/)
+        └─→ 03-token-map ───────┤
+                                │
+        01 merged ──→ 02-instruction-type ──┘
+#+end_example
+
+** Shared-file note (~lox-data.ts~)
+
+Streams *01* and *02* both edit ~lox-data.ts~.  Safe sequencing:
+
+1. *01* lands first: adds ~VizData~ / ~VizSelection~ and deprecated aliases;
+   ~chunks~ stays ~Map<string, CompilerEvent[]>~ temporarily.
+2. *02* rebases on *01*: adds ~Instruction~, changes ~VizData.chunks~, maps in
+   ~deriveVizData~.
+
+Streams *01* and *03* never conflict.  *03* and *02* never conflict.
+
+* What Phase 1 does *not* do
+
+- Move files into ~compiler-viz/~ (Phase 2).
+- Add Python / Pyodide (Phase 3–4).
+- Rename CSS classes or DOM roots.
+- Change connector topology, layout mount, or WASM event handling.
+
+* Acceptance (phase gate)
+
+- [ ] All vitest tests pass (~npx vitest run~ from repo root).
+- [ ] cloxvis post behavior unchanged (manual smoke: Run, AST click, bytecode
+      click, console print connector).
+- [ ] No panel imports ~@/lox-visualizer/events~ except language adapters
+      (~state/state.ts~, ~lox-core.ts~ may still use events).
+- [ ] ~grep -r 'LoxData' app/src~ shows only deprecated aliases or comments,
+      not primary panel types (panels use ~VizData~).
+
+* Next phase
+
+After Phase 1 merges, proceed to Phase 2 in [[file:design-doc.org][design-doc.org]]
+(extract ~compiler-viz/~ package).  Phase 2 task files are not written yet.

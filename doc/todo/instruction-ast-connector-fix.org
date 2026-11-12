@@ -1,0 +1,370 @@
+#+title: Fix Instruction → AST Node Connector (src_offset anchoring)
+#+date: 2026-06-18
+
+Make the bytecode panel connect each VM instruction to the AST node that
+actually produced it.  Today the connector keys on ~CompilerEvent.src_offset~
+== ~AstNode.start~, but the compiler stamps instructions with the wrong source
+offset, so the line drawn between the bytecode row and the AST node lands on
+the wrong node (or nowhere).
+
+* Background
+
+** How the connection works
+The visualizer joins an instruction to a node purely by source byte offset:
+
+- Every AST node carries a ~start~ (its source offset), set in
+  ~state/state.ts~ via ~createNode(..., start)~ / ~expressionNode(type, start,
+  ...)~, and rendered as ~data-start~ on the SVG ~g~ in ~ast.ts~.
+- ~onInstructionClick~ (~lox-visualizer-demo.ts~) looks up
+  ~#lox-ast g[data-start="${instr.src_offset}"]~ and only draws the
+  ~bc-ast~ connector when ~instr.src_offset === node.start~.
+
+So the line is correct only when an instruction's ~src_offset~ equals the
+~start~ the compiler recorded for the owning AST node.
+
+** Root cause (in the clox compiler)
+The compiler lives at
+~/mnt/home/siobhan/Code/learn/cs/crafting-interpreters/clox~.  Every byte is
+stamped at emit time with whatever token happens to be ~parser.previous~:
+
+#+begin_src c
+// src/lib/compiler.c
+static void emitByte(uint8_t byte) {
+  int srcOffset = (int)(parser.previous.start - getScannerStart());
+  writeChunk(currentChunk(), byte, parser.previous.line, srcOffset);
+}
+#+end_src
+
+clox is a single-pass Pratt compiler: an instruction for a construct is emitted
+*after* the construct's children have been parsed.  By then ~parser.previous~
+has advanced to the *last token consumed*, which is not the token the AST node
+was anchored to.  Example from ~binary~:
+
+#+begin_src c
+static void binary(bool canAssign) {
+  int start = parser.previous.start - getScannerStart(); // anchor = operator token
+  parsePrecedence((Precedence)(rule->precedence + 1));    // consumes RIGHT operand
+  expressionNode("Binary", start, 2);                     // node.start = operator offset
+  ...
+  case TOKEN_PLUS: emitByte(OP_ADD); break;               // src_offset = LAST token of RHS
+}
+#+end_src
+
+For ~1 + 2~ the ~Binary~ node's ~start~ is the offset of ~+~, but ~OP_ADD~'s
+~src_offset~ is the offset of ~2~.  They never match.
+
+The same drift hits every instruction emitted after recursing into children:
+~unary~, ~call~ (~OP_CALL~), ~dot~ (~OP_GET/SET_PROPERTY~, ~OP_INVOKE~),
+assignment (~emitBytes(setOp, arg)~), logical ~and~/~or~ jumps, and the
+statement-level jump/loop/pop instructions.  Only instructions emitted
+*immediately* while ~parser.previous~ is still the right token line up today:
+~number~, ~string~, and the ~literal~ keywords (true/false/nil).
+
+~srcOffsets~ was built for clox's runtime needs (line numbers / error
+reporting), where "most recently consumed token" is good enough.  The
+visualizer is the first consumer that needs it to mean "the construct's anchor".
+
+* Approach
+
+Track an explicit *source anchor* in the compiler and stamp emitted bytes with
+it instead of ~parser.previous.start~.  The anchor is the same offset each
+parse function already computes and passes to ~expressionNode~ / ~createNode~,
+so the instruction offsets are guaranteed to agree with the AST node offsets by
+construction.
+
+Mechanism: a module-level ~static int currentSrcOffset~ plus a setter; each
+parse/statement function sets it immediately before emitting its own bytes.
+Because emission is synchronous and children emit their bytes (with their own
+anchors) before the parent emits, a single variable is sufficient — the
+discipline is that a function must *re-set* the anchor after returning from a
+child and before emitting its own instructions.  ~emitByte~ falls back to
+~parser.previous.start~ when no anchor is set, preserving today's behaviour for
+any site not yet migrated.
+
+This is a compiler + WASM-rebuild change; the visualizer side is already wired
+(the ~onClick~ handler in ~bytecode.ts~ has been uncommented).
+
+* Tasks
+
+** DONE Add the source-anchor mechanism to ~emitByte~
+   :PROPERTIES:
+   :files:    /mnt/home/siobhan/Code/learn/cs/crafting-interpreters/clox/src/lib/compiler.c
+   :END:
+
+Introduce a module-level anchor and route ~emitByte~ through it:
+
+#+begin_src c
+static int currentSrcOffset = -1; // -1 = "unset, fall back to parser.previous"
+
+static void setSrcOffset(int offset) { currentSrcOffset = offset; }
+
+static void emitByte(uint8_t byte) {
+  int srcOffset = currentSrcOffset >= 0
+      ? currentSrcOffset
+      : (int)(parser.previous.start - getScannerStart());
+  writeChunk(currentChunk(), byte, parser.previous.line, srcOffset);
+}
+#+end_src
+
+Keep ~emitBytes~, ~emitLoop~, ~emitJump~, ~emitReturn~, ~emitConstant~ delegating
+to ~emitByte~ (they inherit the anchor automatically).
+
+The anchor must be *reset to ~-1~ between statements* (see the reset task), so
+the fallback only ever fires for a genuinely unanchored emit rather than a
+stale carry-over from a previous statement.  Every emitting site is expected to
+set its own anchor; the fallback to ~parser.previous~ is a loud-failure safety
+net, not the normal path.
+
+Note: ~line~ should keep coming from ~parser.previous.line~ so runtime error
+line numbers are unaffected.
+
+** DONE Anchor expression instructions to their construct token
+   :PROPERTIES:
+   :files:    /mnt/home/siobhan/Code/learn/cs/crafting-interpreters/clox/src/lib/compiler.c
+   :END:
+
+Set ~setSrcOffset(start)~ right before the ~emit*~ calls in each expression
+parse function, reusing the ~start~ already captured for ~expressionNode~:
+
+- ~binary~ — anchor = operator offset (~start~) before the ~switch~ that emits
+  ~OP_ADD~/~OP_EQUAL~/etc.
+- ~unary~ — anchor = operator offset before ~OP_NEGATE~/~OP_NOT~.
+- ~call~ — anchor = callee ~start~ before ~emitBytes(OP_CALL, argCount)~.
+- ~dot~ — anchor = property ~start~ before ~OP_GET_PROPERTY~ / ~OP_SET_PROPERTY~
+  / ~OP_INVOKE~.
+- ~namedVariable~ — anchor = name offset for the ~OP_GET_*~ path; anchor =
+  ~assignStart~ for the ~OP_SET_*~ assignment path (matches the ~Assign~ node).
+- ~and_~ / ~or_~ — anchor = operator offset for the short-circuit jumps/pops.
+- ~super_~ / ~this_~ — anchor to the ~super~ / ~this~ keyword offset.
+- ~literal~ / ~number~ / ~string~ — already correct, but set the anchor
+  explicitly too so they don't depend on ~parser.previous~ residue.
+
+Confirm each ~start~ here equals the value passed to the corresponding
+~expressionNode~/~expressionChild~ so node and instruction offsets match.
+
+** DONE Anchor statement & declaration instructions
+   :PROPERTIES:
+   :files:    /mnt/home/siobhan/Code/learn/cs/crafting-interpreters/clox/src/lib/compiler.c
+   :END:
+
+Capture the construct's anchor at the top of each statement/declaration
+function and re-set it before that function's own emits (after any child
+expression/statement has been compiled):
+
+- expression statement — anchor before the trailing ~OP_POP~.
+- ~printStatement~ — anchor = ~print~ keyword before ~OP_PRINT~.
+- ~ifStatement~ / ~whileStatement~ / ~forStatement~ — anchor = the
+  keyword offset for the ~OP_JUMP_IF_FALSE~ / ~OP_JUMP~ / ~OP_LOOP~ / ~OP_POP~
+  instructions, so jumps connect to the ~If~/~While~/~For~ node.
+- ~returnStatement~ + implicit ~emitReturn~ — anchor = ~return~ keyword (or
+  function name offset for the implicit return).
+- ~varDeclaration~ / ~valDeclaration~ + ~defineVariable~ — anchor = variable
+  name offset before ~OP_DEFINE_GLOBAL~ / local slot setup.
+- ~switchStatement~, ~classDeclaration~ (~OP_CLASS~, ~OP_INHERIT~,
+  ~OP_METHOD~), ~function~/closures (~OP_CLOSURE~ + upvalue bytes) — anchor to
+  the relevant keyword/name offset.
+
+Pay attention to ~patchJump~: it back-patches operand bytes that were already
+written by ~emitJump~, so those bytes keep the anchor set when the jump was
+emitted — make sure the anchor is correct at ~emitJump~ time, not at
+~patchJump~ time.
+
+** DONE Reset the anchor between statements and at function boundaries
+   :PROPERTIES:
+   :files:    /mnt/home/siobhan/Code/learn/cs/crafting-interpreters/clox/src/lib/compiler.c
+   :END:
+
+Clear the anchor (~setSrcOffset(-1)~) once a unit of compilation is fully
+emitted, so a forgotten anchor surfaces as a missing/wrong connector instead of
+silently inheriting the previous statement's offset:
+
+- After each top-level / block statement finishes — reset at the end of
+  ~statement~ / ~declaration~ (whichever is the single choke point every
+  statement passes through).
+- At function boundaries: a function body is anchored to the enclosing function
+  while it is being compiled, so the implicit ~OP_NIL; OP_RETURN~ emitted by
+  ~emitReturn~ still belongs to that function.  But once ~endCompiler~ has run
+  and the function's chunk is complete, reset the anchor so the *enclosing*
+  scope doesn't inherit the inner function's offset.  Concretely: set the
+  function anchor in ~function~/~initCompiler~ scope, and reset after
+  ~endCompiler~ returns (and after the ~OP_CLOSURE~ + upvalue bytes for that
+  function are emitted in the enclosing chunk, which get their own anchor).
+
+The invariant to hold: at the moment any ~emit*~ runs, ~currentSrcOffset~ is
+either the correct anchor for that instruction or ~-1~ (never a leftover from
+an unrelated construct).
+
+** DONE Sanity-check against the AST event offsets
+   :PROPERTIES:
+   :files:    /mnt/home/siobhan/Code/learn/cs/crafting-interpreters/clox/src/lib/compiler.c, /mnt/home/siobhan/Code/learn/cs/crafting-interpreters/clox/src/lib/debug.c
+   :END:
+
+Build the JSON binary and eyeball that ~src_offset~ now equals the ~start~ of
+the matching parser/AST event for representative programs:
+
+#+begin_src sh
+cd /mnt/home/siobhan/Code/learn/cs/crafting-interpreters/clox
+make run-json ARGS=test/<some>.lox   # or pipe a snippet
+#+end_src
+
+Check ~1 + 2~, ~-a~, ~f(x)~, ~o.p~, ~o.p = 1~, ~a = b~, ~a and b~,
+~if~/~while~/~for~, ~var x = 1;~, and a small class.  For each emitted
+~"msg_type":"compiler"~ line, its ~src_offset~ should match the ~start~ of the
+parser event that opened the owning node.
+
+** DONE Update / add compiler tests
+   :PROPERTIES:
+   :files:    /mnt/home/siobhan/Code/learn/cs/crafting-interpreters/clox/test/compiler_test.c, /mnt/home/siobhan/Code/learn/cs/crafting-interpreters/clox/test/debug_test.c
+   :END:
+
+Add assertions that pin ~chunk->srcOffsets[offset]~ to the expected source
+offset for a few constructs (at minimum a binary expression, an assignment, and
+an ~if~), so the anchoring can't silently regress.  Run:
+
+#+begin_src sh
+cd /mnt/home/siobhan/Code/learn/cs/crafting-interpreters/clox
+make test
+#+end_src
+
+Fix any existing tests that asserted the old (last-token) offsets.
+
+** DONE Rebuild WASM and deploy into the site
+   :PROPERTIES:
+   :files:    /mnt/home/siobhan/Code/learn/cs/crafting-interpreters/clox/Makefile, static/js/lox-visualizer/lox.js, static/js/lox-visualizer/lox.wasm
+   :END:
+
+Rebuild the Emscripten artifacts and copy them to where the visualizer loads
+them (~lox-core.ts~ requests ~/js/lox-visualizer/lox.js~ + ~lox.wasm~, served
+from ~static/js/lox-visualizer/~):
+
+#+begin_src sh
+cd /mnt/home/siobhan/Code/learn/cs/crafting-interpreters/clox
+make wasm                       # emits bin/lox.js + bin/lox.wasm
+cp bin/lox.js  /home/siobhan/Code/project/active/goodskynet/static/js/lox-visualizer/lox.js
+cp bin/lox.wasm /home/siobhan/Code/project/active/goodskynet/static/js/lox-visualizer/lox.wasm
+#+end_src
+
+(Hugo copies ~static/~ → ~public/~ on build; refresh both if serving from
+~public/~ directly.)
+
+** DONE Verify the connector in the running visualizer
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/bytecode.ts, app/src/lox-visualizer/lox-visualizer-demo.ts
+   :END:
+
+The ~onClick~ handler in ~bytecode.ts~ is already uncommented.  With the new
+WASM in place, click instructions in the bytecode panel and confirm the
+~bc-ast~ line lands on the expected node:
+
+- ~OP_ADD~ in ~1 + 2~ → the ~Binary~ node, not the ~2~ literal.
+- the ~OP_SET_GLOBAL~ in ~a = b~ → the ~Assign~ node.
+- a jump in an ~if~ → the ~If~ node.
+
+If a click highlights nothing, re-check that the instruction's ~src_offset~
+exists as a ~data-start~ on some AST ~g~ (it should, once anchors line up).
+
+* Formal parameters vs call-site arguments
+
+** Diagnosis
+
+There are two distinct "argument" concepts:
+
+*** Call-site arguments (~f(1, a)~) — already wired
+Each argument is compiled by ~argumentList()~ → ~innerExpression()~, which emits
+the usual expression bytecode (~OP_CONSTANT~, ~OP_GET_GLOBAL~, …) with anchors
+at each argument expression's own token.  The AST already has child nodes
+(Number, Variable, …) with ~childType: Argument~ and matching ~start~ offsets.
+These should connect once the src-offset anchoring work above is deployed.
+
+*** Formal parameters (~fun f(a, b)~) — was broken
+Parameter names in a function signature have *no dedicated binding bytecode* in
+clox — arguments arrive on the stack when the function is ~OP_CALL~ed.  The only
+instructions involving a parameter are ~OP_GET_LOCAL~ emitted when the parameter
+is *read* in the body, and those were anchored to the *usage* token, not the
+enclosing ~Function~ node.
+
+The ~Function~ node already represents the whole declaration — name in
+~attrs.name~, parameters in ~attrs.params~ (the ~(a, b)~ label), anchored at the
+~fun~ keyword (~start~ from the ~open~ event).  Parameter reads should connect
+there, not to separate child nodes or to per-usage ~Variable~ nodes in the body.
+
+** Decision
+Formal parameters are part of the ~Function~ / ~Method~ node, not separate AST
+children.  ~OP_GET_LOCAL~ for a formal parameter anchors to ~current->srcOffset~
+(the enclosing function's declaration offset — the ~fun~ keyword or method name),
+so the connector lands on the ~Function~ node that owns ~attrs.params~.
+
+** DONE Track formal parameters on ~Local~ in the compiler
+   :PROPERTIES:
+   :files:    /mnt/home/siobhan/Code/learn/cs/crafting-interpreters/clox/src/lib/compiler.c
+   :END:
+
+Add ~int declOffset~ (~-1~ when unset) to ~Local~ as a marker that a local is a
+formal parameter (the value itself is not used for anchoring).  Initialize to
+~-1~ in ~addLocal~.  In ~function()~'s parameter loop, set ~declOffset~ to any
+non-negative sentinel after ~parseVariable~ so ~namedVariable~ can distinguish
+formals from block locals.
+
+** DONE Anchor ~OP_GET_LOCAL~ for formals to the ~Function~ node
+   :PROPERTIES:
+   :files:    /mnt/home/siobhan/Code/learn/cs/crafting-interpreters/clox/src/lib/compiler.c
+   :END:
+
+In ~namedVariable~, when the resolved op is ~OP_GET_LOCAL~ and
+~current->locals[arg].declOffset >= 0~ (formal parameter), call
+~setSrcOffset(current->srcOffset)~ — the enclosing function's anchor — instead
+of the usage-site offset from ~variable()~.  Block-local ~var~ reads keep
+anchoring to the usage site.  Assignments to parameters (~a = …~) still anchor
+to the ~Assign~ node at the ~ =~ token.
+
+** DONE Tests for parameter wiring
+   :PROPERTIES:
+   :files:    /mnt/home/siobhan/Code/learn/cs/crafting-interpreters/clox/test/compiler_test.c
+   :END:
+
+- CUnit: ~fun f(a) { print a; }~ — ~OP_GET_LOCAL~ for ~a~ in the ~f~ chunk has
+  ~srcOffsets~ equal to ~0~ (the ~fun~ keyword / ~Function~ node), not the body
+  usage at offset ~17~.
+
+** DONE Highlight declaration attrs together in the lexer
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/state/state.ts, app/src/lox-visualizer/ast.ts
+   :END:
+
+Store source offsets for ~ATTR~ / ~PUSHATTR~ on ~node.attrStarts~ (~name~,
+~params~, …).  ~collectSubtreeStarts~ includes those offsets so selecting a
+~Function~ node (or an instruction anchored to it) highlights ~fun~, the function
+name, and each parameter identifier together in the lexer panel.
+
+* Decisions
+
+** Implicit instructions are owned by the enclosing construct
+Instructions with no natural single owning token — the implicit
+~OP_NIL; OP_RETURN~ at the end of a function body, the ~OP_POP~ that discards a
+condition, etc. — are anchored to the *enclosing construct's* offset (the
+function name / keyword offset, the ~if~/~while~/~for~ keyword, ...).  They
+should draw a connector to that construct's node rather than being left
+unanchored.
+
+** Per-operand offsets are a non-issue
+A multi-byte instruction (e.g. ~OP_CONSTANT <index>~, jumps) writes a
+~srcOffsets~ entry for *every* byte, so the operand bytes also carry an offset.
+This does not matter: the disassembler only ever reads
+~chunk->srcOffsets[offset]~ at each instruction's *opcode* offset (see the
+~json*Instruction~ functions in ~debug.c~), never at an operand slot, so the
+operand entries are dead data.  Having every byte inherit the opcode's anchor
+via ~emitByte~ is exactly what we want; no special handling is needed.
+
+** ~currentSrcOffset~ resets to ~-1~ between statements — fail loud
+Reset the anchor to ~-1~ (unset) at the end of each statement.  A "forgot to
+set the anchor" bug should surface immediately as a wrong/missing connector
+rather than silently carrying a stale offset from a previous statement.
+Failing loud is preferred over the more forgiving carry-over.
+
+** ~srcOffsets~ has no other consumers — refactor freely
+~srcOffsets~ exists solely to support this visualization feature.  It (along
+with the JSON compiler logging and the ~emitByte~ change) was introduced in the
+latest clox commit, ~fa3e8f4~ ("feat(lox-visualizer): Log compiler vm
+instructions for visualization").  Nothing else reads it — runtime line numbers
+come from a separate array — so any code from that commit can be refactored
+without worrying about other consumers.

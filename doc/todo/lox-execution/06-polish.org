@@ -1,0 +1,132 @@
+#+title: Polish
+#+date: 2026-06-18
+#+phase: 3 (after 03, 04, 05)
+
+Small improvements once the core playback is working end-to-end.  Each item is
+independent and can be done in any order.
+
+* Tasks
+
+** TODO Keyboard shortcuts
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/panels/playback-controls.ts
+   :END:
+
+Add a =keydown= listener on the document (or the visualizer container) in
+=PlaybackControls.setUp=:
+
+| Key         | Action                           |
+|-------------+----------------------------------|
+| Space       | toggle play/pause                |
+| ArrowLeft   | step backward                    |
+| ArrowRight  | step forward                     |
+| Home        | go to start                      |
+| End         | go to end                        |
+
+Only activate when =ExecutionStore.steps.length > 0= and the visualizer is in
+focus.  Prevent default to avoid page scroll on Space/arrow keys.
+
+Remove the listener in =tearDown=.
+
+** TODO Variable auto-play speed
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/panels/playback-controls.ts
+   :END:
+
+Add a =<select>= to the controls bar:
+
+#+begin_src html
+<select class="pb-speed">
+  <option value="400">0.5×</option>
+  <option value="200" selected>1×</option>
+  <option value="100">2×</option>
+  <option value="50">4×</option>
+</select>
+#+end_src
+
+When the user changes the speed while playing, clear and restart the interval
+at the new rate.  Store the selected speed in a local field (not in the store —
+it's UI-only state).
+
+** DONE Step-count cap with a warning
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer-demo.ts (or orchestrator), 01-c-event.org follow-up
+   :END:
+
+For programs with long loops, the step array can become very large.  Add a
+frontend cap:
+
+#+begin_src typescript
+const MAX_STEPS = 10_000;
+
+events.on('vm_step', (event: VmStep) => {
+    const current = this.executionStore.get();
+    if (current.steps.length >= MAX_STEPS) return;
+    this.executionStore.set({ steps: [...current.steps, event] });
+});
+#+end_src
+
+After =runSource= returns, if =steps.length >= MAX_STEPS=, show a banner:
+
+#+begin_src typescript
+if (steps.length >= MAX_STEPS) {
+    console.warn(`Execution trace capped at ${MAX_STEPS} steps.`);
+    // optionally show a UI notice in the console panel
+}
+#+end_src
+
+A C-side cap (emitting a special sentinel event when the limit is hit) is
+cleaner but optional — the frontend cap is sufficient for now.
+
+** DONE Optimize store push for large traces
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer-demo.ts
+   :END:
+
+The spread-copy in the =vm_step= handler (=steps: [...current.steps, event]=)
+allocates a new array on every step.  For large traces this is O(n²) total
+allocation.
+
+Replace with a mutable module-level array that the store holds by reference:
+
+#+begin_src typescript
+// Outside the class / in setUp:
+const stepBuffer: VmStep[] = [];
+
+events.on('vm_step', (event: VmStep) => {
+    if (stepBuffer.length >= MAX_STEPS) return;
+    stepBuffer.push(event);
+    // Notify subscribers by writing the same reference with a version bump,
+    // or use a wrapper object { steps, version } so subscribers see a change.
+});
+
+// After runSource:
+this.executionStore.set({ currentStep: stepBuffer.length > 0 ? 0 : null });
+#+end_src
+
+This requires the store's change-detection to see a change even when the array
+reference doesn't change.  One option: wrap steps as ={ steps: VmStep[];
+version: number }= and increment =version= on each push; subscribers read =steps=.
+
+** DONE Connector from executing instruction to focused AST node
+   :PROPERTIES:
+   :files:    orchestrator, connector-layer (arch-refactor)
+   :END:
+
+During playback, the executing =vm_step= carries a =chunk= and =offset= which maps
+to the bytecode instruction's =srcOffset=.  This is the same mapping used by the
+existing (currently disabled) bc→ast connector.
+
+Once the instruction→AST-node mapping is reliable (see
+=doc/todo/instruction-ast-connector-fix.org=), wire the connector:
+
+1. The bytecode panel (04) already calls =setExecuting(chunk, offset)=.
+2. Extend =setExecuting= to also call =setAnchor('bc-exec', row.getBoundingClientRect())=
+   when the row is found.
+3. Add a connector line declaration in the orchestrator:
+   =connectors.addLine('bc-exec', 'ast', colors.executing)=.
+4. The AST panel resolves =step.chunk= → =srcOffset= → AST node and calls
+   =setAnchor('ast-exec', rect)=.
+
+This is a larger follow-up and depends on both the arch-refactor connector layer
+and the mapping fix; defer until both are complete.

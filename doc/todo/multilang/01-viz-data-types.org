@@ -1,0 +1,125 @@
+#+title: VizData and VizSelection Types
+#+date: 2026-06-18
+#+phase: 1a (parallel with 03; gate for 02)
+
+Introduce language-neutral names for the derived snapshot and cross-panel
+selection.  Keep Lox-specific names as deprecated type aliases so existing
+imports keep compiling during migration.
+
+Canonical spec: [[file:design-doc.org][design-doc.org]] → "Generic data contract".
+
+* Background
+
+Today ~lox-data.ts~ exports ~LoxData~, ~LoxDataStore~, ~VisualizerSelection~,
+and ~deriveLoxData~.  Every panel and ~visualization-panel.ts~ imports those
+names.  Phase 2 will move this file to ~compiler-viz/types.ts~; Phase 1 only
+renames and documents the contract *in place*.
+
+~ConsoleStore~ and ~ConsoleMessage~ stay as-is (already generic enough).
+
+* Target shapes (~lox-data.ts~)
+
+#+begin_src typescript
+export interface VizData {
+    lexemes: Lexeme[];
+    ast: AstNode;
+    /** Bytecode rows per chunk — still CompilerEvent[] until 02 lands. */
+    chunks: Map<string, CompilerEvent[]>;
+}
+
+export interface VizSelection {
+    selectedStart: number | null;
+    selectedAstNode: AstNode | null;
+}
+
+export type VizDataStore = Store<{ data: VizData | null }>;
+
+/** @deprecated Use VizData */
+export type LoxData = VizData;
+/** @deprecated Use VizDataStore */
+export type LoxDataStore = VizDataStore;
+/** @deprecated Use VizSelection */
+export type VisualizerSelection = VizSelection;
+
+export function deriveVizData(state: LoxState): VizData { /* … */ }
+/** @deprecated Use deriveVizData */
+export const deriveLoxData = deriveVizData;
+#+end_src
+
+** Offset convention (document now)
+
+Add a file-level comment in ~lox-data.ts~:
+
+- All ~selectedStart~, ~Lexeme.start~, and instruction source keys are *UTF-16
+  code unit* offsets into the editor document string (JavaScript ~String~ indexing).
+- Language adapters (Python, later) must flatten native spans to this convention
+  before publishing ~VizData~.
+
+* Tasks
+
+** DONE Add ~VizData~ and ~VizSelection~ interfaces
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-data.ts
+   :END:
+
+- Define ~VizData~ and ~VizSelection~ as above.
+- Keep ~chunks~ as ~Map<string, CompilerEvent[]>~ for now (stream *02* changes
+  it to ~Instruction[]~).
+- Add the UTF-16 offset convention comment.
+
+** DONE Add store and builder aliases
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-data.ts
+   :END:
+
+- ~VizDataStore~ as canonical store type.
+- Rename implementation ~deriveLoxData~ → ~deriveVizData~; export
+  ~deriveLoxData~ as deprecated alias.
+- Orchestrator (~lox-visualizer.ts~) calls ~deriveVizData~.
+
+** DONE Migrate panel and base imports to canonical names
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/visualization-panel.ts,
+              app/src/lox-visualizer/panels/*.ts,
+              app/src/lox-visualizer/layout.ts,
+              app/src/lox-visualizer/lox-visualizer.ts,
+              app/src/lox-visualizer/slots/slots.test.ts
+   :END:
+
+Replace primary usages:
+
+| Old | New |
+|-----+-----|
+| ~LoxData~ | ~VizData~ |
+| ~LoxDataStore~ | ~VizDataStore~ |
+| ~VisualizerSelection~ | ~VizSelection~ |
+| ~deriveLoxData~ | ~deriveVizData~ |
+
+Leave deprecated aliases in ~lox-data.ts~ for any external references not
+updated in this stream.
+
+** DONE Add unit test for deriveVizData alias
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-data.test.ts
+   :END:
+
+- Assert ~deriveVizData === deriveLoxData~ (same function reference).
+- Optional: one fixture asserting ~deriveVizData~ returns ~VizData~ shape from a
+  minimal ~LoxState~ (reuse patterns from ~state/state.test.ts~ if lightweight).
+
+* Dependencies
+
+- None within Phase 1 except the arch-refactor gate.
+- Stream *02* should merge after this file's ~VizData~ interface exists.
+
+* Acceptance
+
+- Typecheck clean; vitest green.
+- Panels import ~VizData~ / ~VizSelection~, not ~LoxData~ / ~VisualizerSelection~.
+- ~deriveVizData~ is the name used in ~lox-visualizer.ts~.
+- Deprecated aliases still export for backward compatibility.
+
+* Open questions
+
+- Move ~Lexeme~ type from ~state/state.ts~ into ~lox-data.ts~ now, or defer to
+  Phase 2?  *Defer* — out of scope; ~Lexeme~ stays in ~state.ts~ for this stream.

@@ -1,0 +1,110 @@
+#+TITLE: Migrating to Vitest
+#+DATE: 2026-03-13
+
+* Big Picture
+
+The lox-visualizer codebase has been going through a TypeScript migration.
+The goal isn't just type safety for its own sake — it's to get the code into a
+state where the broken parser logic (~parseExpressionNode~, ~parseExpression~,
+~parseNode~) can be reasoned about and fixed with confidence.
+
+Before that can happen, the test suite needs to be trustworthy. The old
+approach embedded test cases directly in ~state.ts~ using a hand-rolled test
+runner (~testSuite~ / ~test.addCase~ / ~test.runTests~). This had several
+problems:
+
+- Tests ran in the browser, not in a shell — there was no way to run them from
+  the command line or get a pass/fail exit code
+- The test infrastructure code lived inside the production module, tangling
+  concerns
+- There was no watch mode, so you had to manually reload a browser tab to see
+  results
+
+The session replaced all of this with [[https://vitest.dev/][Vitest]], a test runner built on Vite.
+Because the project already uses Vite, Vitest slots in with almost no
+configuration — it inherits the ~vite.config.js~ settings (including the ~@/~
+path alias) automatically.
+
+* What Changed
+
+** ~vite.config.js~
+Added a ~test~ block with ~globals: true~. This makes ~describe~, ~it~, and
+~test~ available in test files without importing them, matching the style of
+Jest and Mocha.
+
+#+begin_src javascript
+test: {
+  root: resolve(__dirname, 'app/src'),
+  globals: true,
+},
+#+end_src
+
+** ~tsconfig.json~
+Added ~"vitest/globals"~ to ~types~ so TypeScript knows about the global test
+functions (~describe~, ~it~, etc.) without explicit imports.
+
+** ~Makefile~
+Two targets added or updated:
+
+- ~make test~ — runs ~vitest run~, a one-shot execution. Good for CI or a
+  quick manual check.
+- ~make dev~ — now runs three processes concurrently: the Vite build watcher,
+  the Vitest watcher, and the Hugo dev server. Tests rerun on every save
+  alongside the live build.
+
+The project uses a Makefile (not ~package.json~ scripts) as the canonical
+interface for tasks.
+
+** ~app/src/lox-visualizer/state/state.ts~
+Removed all test infrastructure: the ~testSuite~ import, the ~const test = ...~
+declaration, and every ~test.addCase(...)~ block and ~test.runTests()~ call.
+The production module is now clean.
+
+** ~app/src/lox-visualizer/state/state.test.ts~ (new file)
+All test cases migrated here. Each ~test.addCase('name', fn)~ became ~it('name',
+fn)~, grouped under a single ~describe('LoxState.parse()', ...)~ block.
+~assert~ is still imported from Chai — Vitest is compatible with Chai assertions
+out of the box.
+
+* What I Learned
+
+** ~vitest run~ vs ~vitest~
+~vitest run~ exits after one pass — appropriate for ~make test~ or CI. ~vitest~
+(no subcommand) enters watch mode and re-runs affected tests on file changes.
+This is the same pattern as ~vite build~ vs ~vite build --watch~.
+
+** Vitest inherits Vite config
+Because the project already had ~resolve.alias: { '@': ... }~ in
+~vite.config.js~, the ~@/~ import prefix works in test files for free. No
+duplicate configuration needed.
+
+** ~globals: true~ and why it matters
+Without ~globals: true~, every test file needs ~import { describe, it } from
+'vitest'~. With it enabled, those are injected globally — closer to the Jest
+experience and less boilerplate. The tradeoff is that ~tsconfig.json~ must
+include ~"vitest/globals"~ in its ~types~ array so the compiler agrees.
+
+** Tests in their own file
+Keeping tests in a ~.test.ts~ file separate from the module under test is
+standard practice, but it's worth naming why it matters here: the old approach
+forced the test infrastructure to be imported by the production module, which
+dragged ~window~ into the module graph. Vitest runs in Node (no ~window~), so
+this broke immediately and forced the cleanup. The separation is now enforced
+by the tooling, not just convention.
+
+* Current Test Status
+
+4 of 5 tests pass:
+
+- [X] ~empty input returns empty program node~
+- [X] ~function with empty body~
+- [X] ~function with print body~
+- [X] ~expression: 10 + 20 * 2~
+- [ ] ~fn call: f(1, 2)~ — *fails*
+
+The failing test exposes a real bug in ~parseExpressionNode~. The output shows
+that child type assignment (~Callee~, ~Argument~) is not being applied, and the
+parser is consuming ~Program~ open/close events as nested nodes rather than
+treating them as the outer wrapper. This bug pre-existed the migration — the
+test infrastructure just wasn't surfacing it. Fixing this parser logic is the
+next task.

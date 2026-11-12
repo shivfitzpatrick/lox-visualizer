@@ -1,0 +1,88 @@
+#+title: Crash State — Report Traps Honestly
+#+date: 2026-08-03
+#+phase: 2 (after 02, parallel with 04)
+#+TODO: TODO NEXT IN-PROGRESS WAITING | DONE CANCELLED
+
+Once program errors no longer throw (stream 02), an exception out of
+~runSource~ means one thing: the module is dead.  Say so.
+
+* Background
+
+A trap — C stack overflow from deep Lox recursion, OOB write, failed ~malloc~ —
+goes through the glue's ~abort()~, which throws ~WebAssembly.RuntimeError~ and
+sets ~ABORT = true~.  After that the instance is unusable: memory is trapped and
+the export wrappers' ~assert(runtimeInitialized)~ no longer holds.  Re-running
+cannot work, so the Build button *should* be disabled — but deliberately and
+with a reason, not stuck mid-run as today.
+
+Depends on 02: before it, this state would fire on every typo.
+
+* Tasks
+
+** TODO Distinguish crashed from running
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+In ~reportRunFailure~, set ~this.root.dataset.crashed = ''~ — a separate flag
+from ~data-running~, which stream 01's ~finally~ always clears.
+
+Message, reader-facing first and the raw text second:
+
+#+begin_example
+  The interpreter crashed and cannot continue. Reload the page to try again.
+  (WebAssembly.RuntimeError: ...)
+#+end_example
+
+Have ~runAndPublish~ bail early if ~dataset.crashed~ is already set — calling
+into a dead module produces a second, more confusing failure.
+
+** TODO Crash styling for the Build button
+   :PROPERTIES:
+   :files:    static/css/lox-visualizer.css
+   :END:
+
+Alongside the existing ~[data-running] .lox-run-button~ rule:
+
+#+begin_src css
+  [data-crashed] .lox-run-button {
+      opacity: 0.5;
+      pointer-events: none;
+  }
+  [data-crashed] .lox-run-button::after {
+      content: ' — crashed, reload';
+      font-size: 0.8em;
+  }
+#+end_src
+
+The point is that a disabled button reads as deliberate.  Today's stuck ~…~
+suffix looks like a run that is still going.
+
+** TODO Surface a failure that happens before mount
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+Left open by stream 01: if ~createLox()~ itself fails (WASM 404, instantiation
+error), no panels exist yet and the entry-point catch only logs.  The reader
+sees the original ~<pre>~, or nothing.
+
+Minimum: render a plain message into the mount point so the page does not
+silently omit the visualizer.  ~mountVisualizer~ has already replaced the ~<pre>~
+by then, so the root element is available — one styled div is enough.
+
+** TODO Tests
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/*.test.ts
+   :END:
+
+- ~runSource~ throws → ~data-crashed~ set, ~data-running~ cleared, crash message
+  present
+- a second ~rerun~ after a crash → no call into the module, no second exception
+- non-OK *result code* (not a throw) → ~data-crashed~ *not* set; this is the
+  regression guard that keeps 02's distinction from eroding
+
+* Done when
+
+A trap produces a clear crash message and an obviously-deliberate disabled
+button; an ordinary program error never reaches this path.

@@ -1,0 +1,133 @@
+#+title: AST → Token Connector Line
+#+date: 2026-06-17
+
+Draw a line from the focused/hovered AST node to the corresponding token
+span in the lexer panel, both on hover and on arrow-key selection.
+
+* Background
+
+The lexer panel (~#lox-lexer~) renders source tokens as ~span.code-item~
+elements with text taken from ~Lexeme.start~.  The AST panel (~#lox-ast~)
+renders nodes into an SVG via d3.  The two panels are separate DOM
+subtrees; a connecting line must span them.
+
+Each ~ParserEvent~ carries a ~start~ character offset, but this is
+currently consumed during parsing (to resolve lexeme text) and discarded —
+it is never stored on the resulting ~AstNode~.  That makes it impossible to
+later identify which lexer span belongs to a given node without re-plumbing
+the data.
+
+* Tasks
+
+** DONE Thread ~start~ through ~AstNode~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/ast.ts, app/src/lox-visualizer/state/state.ts
+   :END:
+
+Add a ~start?: number~ field to ~AstNodeSelf~ (and therefore ~AstNode~ and
+~AstNodeBuilder~).  Populate it from ~parserEvent.start~ at every call site
+in ~parseNode~ and ~parseExpression~ where a node is created:
+
+- ~PARSER_ACTIONS.OPEN~ → ~createNode~ for statement nodes
+- The root of ~parseExpressionNode~ → expression nodes
+
+~createNode~ should accept an optional ~start~ parameter so callers can
+pass it cleanly.
+
+** DONE Tag lexer spans with ~data-start~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer-demo.ts
+   :END:
+
+In ~displayLex~, add a ~data-start~ attribute to each span:
+
+#+begin_src typescript
+.attr('data-start', (d) => d.start)
+#+end_src
+
+This gives the connector a stable, O(1)-lookup selector:
+~span[data-start="N"]~.  Only meaningful tokens have a ~start~; whitespace
+lexemes (type: null) get it too, which is fine — they just won't be
+targeted.
+
+** DONE Expose a highlight-change callback from ~drawAst~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/ast.ts
+   :END:
+
+Add an optional ~onHighlight?: (node: AstNode | null) => void~ parameter to
+~drawAst~.  Call it:
+
+- Inside ~moveFocus~ (keyboard navigation and click already go through here)
+- On ~mouseenter~ of each node (hover-in)
+- On ~mouseleave~ of each node — but only clear if the node losing hover is
+  not the keyboard-focused one, so arrow focus and hover don't fight each
+  other
+
+The callback receives the full ~AstNode~ datum (which now carries ~start~)
+or ~null~ to clear.  Keep hover and keyboard focus independent: hover is
+ephemeral (clears on leave), keyboard focus persists until navigation
+changes.
+
+** DONE Create ~connector.ts~ overlay module
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/connector.ts  (new)
+   :END:
+
+A module that owns a single ~position: fixed; pointer-events: none~ SVG
+element appended to ~document.body~.  Public API:
+
+#+begin_src typescript
+export function drawConnector(from: DOMRect, to: DOMRect): void
+export function clearConnector(): void
+#+end_src
+
+~drawConnector~ draws a line from the bottom-center of ~from~ to the
+top-center of ~to~ (or nearest edge, depending on vertical relationship).
+Use the highlight color from the color scheme.  ~clearConnector~ removes
+the line but keeps the SVG element in the DOM to avoid thrashing.
+
+The SVG should be sized to cover the full viewport (~width: 100vw; height:
+100vh; top: 0; left: 0~).  Because both rects come from
+~getBoundingClientRect~, coordinates are already viewport-relative and
+correct for ~position: fixed~.
+
+Note: the line will be stale if the user pans/zooms the AST canvas while a
+node is highlighted.  Hooking into the d3 zoom event to redraw on pan is a
+follow-up; for now, stale lines are acceptable.
+
+** DONE Wire connector into demo
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer-demo.ts
+   :END:
+
+Pass an ~onHighlight~ callback to ~drawAst~ that:
+
+1. Receives the ~AstNode | null~ from the callback
+2. If null, calls ~clearConnector()~
+3. Otherwise:
+   a. Looks up the matching lexer span: ~document.querySelector(`#lox-lexer span[data-start="${node.start}"]`)~
+   b. Gets its ~getBoundingClientRect()~
+   c. Gets the bounding rect of the focused AST node's ~rect~ element
+      (the SVG ~rect~ inside the corresponding ~g~, via a ~data-start~
+      attribute added to the ~g~ in step 3, or by querying d3 selection
+      within the callback)
+   d. Calls ~drawConnector(astRect, lexerRect)~
+
+Clean up (call ~clearConnector~) in the component's ~tearDown~ and at the
+start of each ~render~ call before re-drawing.
+
+Consider also adding a ~resize~ event listener on ~window~ that redraws the
+current connector if one is active, since viewport dimensions can shift the
+rects.
+
+* Open questions
+
+- Should hover show a dimmer/dashed line and keyboard focus show a solid
+  one, to communicate the difference?
+- For nodes whose ~start~ falls in whitespace (no matching span), should we
+  fall back to the nearest token, or silently skip the connector?
+- The AST node's screen rect is obtained from the SVG ~rect~ element.  If
+  the node is scrolled out of the SVG's visible area (off-canvas after
+  panning), do we still draw the line?  Probably fine for now — ~moveFocus~
+  always animates the node into view first.

@@ -1,0 +1,266 @@
+#+title: Console — Playback-Aware Print Output
+#+date: 2026-06-19
+#+phase: 4 (after 05 — depends on ExecutionStore)
+
+Show print output in sync with playback: each =print= statement's output appears
+only once the scrubber reaches the step where it executed.  Scrubbing backward
+hides prints that hadn't happened yet.  Errors always show in full.
+
+* Background
+
+Currently =ConsolePanel= renders all console messages from =ConsoleStore= at
+once after the program finishes.  The messages are pushed by the orchestrator
+as events arrive synchronously during =runSource=.
+
+Because =print= events and =vm_step= events are both emitted from the same
+synchronous dispatch loop (in the order they appear on stdout), we can stamp
+each print with the index of the =vm_step= that follows it.  No C-side changes
+are needed.
+
+** Ordering guarantee
+
+The stdout interleaving for a =print= statement is:
+
+#+begin_example
+{"msg_type":"print","text":"hello"}   ← emitted during OP_PRINT dispatch
+{"msg_type":"vm_step","chunk":"script","offset":5,...}  ← emitted after
+#+end_example
+
+So a print event that arrives when =N= vm_steps have already been buffered
+belongs to step =N= (the next step to be pushed).  The orchestrator tracks a
+=stepCount= counter, incremented on each =vm_step=, and stamps each print with
+the current =stepCount= at the moment the print event fires.
+
+* Design decisions
+
+** Prints move out of =ConsoleStore=
+
+Currently the print event handler pushes to =loxState.consoleMessages= and
+calls =publishConsole()=.  In the new flow, prints are buffered separately as
+=TaggedPrint[]= and published via =ExecutionStore=.  The orchestrator no longer
+pushes =type:'print'= messages to =consoleMessages=.
+
+=ConsoleStore= then contains only =type:'error'= messages.  Errors remain there
+because they are not associated with a step (compile errors have no vm_steps;
+runtime errors terminate execution so no vm_step follows them).
+
+** Dual-source rendering in =ConsolePanel=
+
+=ConsolePanel= receives an optional =executionStore= parameter.  When present
+and =steps.length > 0=, it renders two categories:
+
+1. All errors from =ConsoleStore= (always visible — errors are not step-gated)
+2. Prints from =ExecutionStore.prints= where =stepIndex <= currentStep=
+
+When =executionStore= is absent or =steps.length === 0= (compile error, or
+Python visualizer which never sets vm_step), the panel falls back to rendering
+=consoleStore.messages= as before.  This preserves backward compatibility with
+=PythonVisualizer= without any changes there.
+
+** Error interleaving
+
+Errors and prints are rendered in separate groups (errors first, then prints)
+rather than in strict stdout order.  Interleaving them correctly by step is a
+polish item; the current approach keeps the implementation simple.
+
+* Tasks
+
+** TODO Add =TaggedPrint= to =ExecutionState=
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/execution.ts
+   :END:
+
+Add the type and extend the state shape:
+
+#+begin_src typescript
+export interface TaggedPrint {
+    text: string;
+    stepIndex: number;       // index of the vm_step this print precedes
+    srcOffset?: number;      // for selection highlighting (keeps console↔bc connector working)
+    chunk?: string;
+    offset?: number;
+}
+
+export interface ExecutionState {
+    steps: VmStep[];
+    prints: TaggedPrint[];   // ← new
+    currentStep: number | null;
+    playing: boolean;
+}
+
+export const INITIAL_EXECUTION_STATE: ExecutionState = {
+    steps: [],
+    prints: [],              // ← new
+    currentStep: null,
+    playing: false,
+};
+#+end_src
+
+** TODO Buffer and tag prints in the orchestrator
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+Add a =printBuffer= field and a =stepCount= counter (per-run local tracking):
+
+#+begin_src typescript
+private printBuffer: TaggedPrint[] = [];
+private stepCount = 0;
+#+end_src
+
+Change the =print= event handler in =setUp()=: push to =printBuffer= instead of
+=consoleMessages=, stamping with =stepCount=:
+
+#+begin_src typescript
+lox.events.on('print', (event) => {
+    this.printBuffer.push({
+        text: event.text,
+        stepIndex: this.stepCount,
+        srcOffset: event.src_offset,
+        chunk: event.chunk,
+        offset: event.offset,
+    });
+    // No longer calls publishConsole() — prints flow through executionStore.
+});
+#+end_src
+
+Change the =vm_step= handler to increment =stepCount=:
+
+#+begin_src typescript
+lox.events.on('vm_step', (event) => {
+    this.stepBuffer.push(event);
+    this.stepCount++;
+});
+#+end_src
+
+After =runSource()=, include =prints= in the store publish:
+
+#+begin_src typescript
+this.executionStore.set({
+    steps: this.stepBuffer,
+    prints: this.printBuffer,
+    currentStep: this.stepBuffer.length > 0 ? 0 : null,
+});
+#+end_src
+
+** TODO Reset print buffer on rerun
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+In =rerun()=, clear =printBuffer= and =stepCount= alongside =stepBuffer=:
+
+#+begin_src typescript
+this.stepBuffer = [];
+this.printBuffer = [];
+this.stepCount = 0;
+this.executionStore.set({ steps: [], prints: [], currentStep: null, playing: false });
+#+end_src
+
+** TODO Wire =executionStore= into =ConsolePanel=
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/panels/console-panel.ts, app/src/compiler-viz/layout.ts
+   :END:
+
+Add an optional constructor parameter to =ConsolePanel=:
+
+#+begin_src typescript
+constructor(
+    container: HTMLElement,
+    dataStore: VizDataStore,
+    private consoleStore: ConsoleStore,
+    selectionStore: Store<VizSelection>,
+    connectors: ConnectorLayer,
+    private executionStore?: ExecutionStore,   // ← new, optional
+) {
+    super(container, dataStore, selectionStore, connectors);
+}
+#+end_src
+
+In =setUp()=, if =executionStore= is present, subscribe to it and call
+=renderAll()= on change:
+
+#+begin_src typescript
+if (this.executionStore) {
+    this.unsubExecution = this.executionStore.subscribe(() => this.renderAll());
+}
+#+end_src
+
+Add a private =renderAll()= method that picks the rendering mode:
+
+#+begin_src typescript
+private renderAll(): void {
+    const exec = this.executionStore?.get();
+    if (exec && exec.steps.length > 0) {
+        // Playback mode: errors from consoleStore + filtered prints from executionStore.
+        const step = exec.currentStep ?? 0;
+        const errors = this.consoleStore.get().messages.filter(m => m.type === 'error');
+        const prints: ConsoleMessage[] = exec.prints
+            .filter(p => p.stepIndex <= step)
+            .map(p => ({ type: 'print', text: p.text, srcOffset: p.srcOffset,
+                         chunk: p.chunk, offset: p.offset }));
+        this.renderMessages([...errors, ...prints]);
+    } else {
+        // Fallback: render consoleStore as before.
+        this.renderMessages(this.consoleStore.get().messages);
+    }
+}
+#+end_src
+
+Replace both existing =renderMessages= call-sites (in =setUp= and the
+=consoleStore= subscription) with calls to =renderAll()=.
+
+In =tearDown()=, unsubscribe the executionStore subscription:
+
+#+begin_src typescript
+this.unsubExecution?.();
+this.unsubExecution = undefined;
+#+end_src
+
+In =layout.ts=, update the console registry entry to pass =ctx.executionStore=:
+
+#+begin_src typescript
+registry.set(
+    'console',
+    (container) =>
+        new ConsolePanel(container, ctx.dataStore, ctx.consoleStore,
+                         ctx.selectionStore, ctx.connectors, ctx.executionStore),
+);
+#+end_src
+
+** TODO Verify =console↔bc= connector still works
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/panels/console-panel.ts
+   :END:
+
+The console↔bc connector relies on console lines having =data-src-offset=
+attributes and triggering =selectionStore.set= on click.  Verify these still
+work in playback mode:
+
+- =TaggedPrint= carries =srcOffset= (from the original print event) — pass it
+  through in =renderAll()=.
+- The =renderMessages= d3 join already sets =data-src-offset= and click handlers
+  on messages that have =srcOffset=.  No change needed there.
+
+Run the visualizer with a multi-function program, scrub to a =print= step, click
+the print output, and confirm the bytecode arrow moves to the =OP_PRINT= row and
+the connector line appears.
+
+* Open questions
+
+- *Errors at runtime*: a runtime error (e.g. undefined variable) produces a
+  =stderr= event after the last successful vm_step.  Currently errors always
+  show in full, appearing before the filtered prints.  This means the error is
+  visible even when =currentStep= is still at step 0 before the error point.
+  Consider gating errors by step too (add =stepIndex= to error messages) in a
+  follow-up.
+
+- *No vm_steps but prints exist*: this shouldn't happen in practice (prints only
+  come from OP_PRINT which always emits a vm_step), but if it does the prints
+  will be in =printBuffer= with =stepIndex = 0= and will never display (since
+  =steps.length === 0= keeps the fallback path).  Acceptable for now.
+
+- *Console visibility*: the current CSS hides the console when its DOM is empty
+  (=:not(:empty)=).  In playback mode the console is empty at step 0 until
+  the first print.  This is correct behavior — it will appear when prints start
+  to show.  No CSS change needed.

@@ -1,0 +1,55 @@
+#+title: Lox Visualizer Sample Program — Overview
+#+date: 2026-08-03
+
+This directory handles design documents and todo lists related to the
+sample program feature described in this document.
+
+* Overview
+I want to be able to toggle between sample programs.
+
+* Decisions (2026-08-11)
+- Storage: bundled + lazy-loaded — ~app/src/lox-visualizer/samples/*.lox~
+  via ~import.meta.glob~ with ~?raw~ (precedent: ~emitter.py?raw~).
+  Rejected: fetch from ~static/~ (stringly URLs, fetch error path,
+  independent cache staleness).
+- Widget: styled native ~<select>~, matching the app palette.
+  Rejected: custom ~<details>~ menu à la pane-switcher (more code,
+  manual a11y, not needed for 5 entries).
+- The page-scraped initial doc (fenced block in
+  ~content/visualizers.md~) stays the initial editor content; the
+  dropdown starts on "Loop printer", which matches it (revised
+  2026-08-11 from a disabled placeholder).  An "Empty" entry clears
+  the editor.  *Superseded 2026-08-12 by ~05-container-mount.org~:*
+  the page no longer carries a fenced block, so the default sample is
+  the initial editor content.
+- Replacing editor contents on selection is unconditional; a
+  dirty-editor confirm is out of scope.
+
+* Plan documents
+- ~01-prereq-build-entry.org~ — the build is broken at HEAD
+  (~vite.config.js~ points at a missing ~main.ts~); fix first.
+- ~02-samples-store.org~ — sample files, glob map, lazy loading.
+- ~03-dropdown-ui.org~ — ~EditorSlot~ changes, threading via
+  ~PanelContext.samples~, CSS, tests.
+- ~04-choose-samples.org~ — the five programs, with drafts.
+- ~05-container-mount.org~ — ~app/src/index.ts~ mounts into
+  ~#viz-lox-container~; both visualizers move to container mounts and
+  the Python one is unpublished (source kept) until it is ready.
+
+Order: 01 → (02 ∥ 03) → integrate → 04 → 05.
+
+** Tasks
+*** Dropdown to select programs
+- this should be a styled dropdown that matches the look and feel of
+  the rest of the app
+- it should be placed above the code mirror editor in 
+*** Selection chooses a sample
+- when a sample is selected we should grab the text of the related
+  sample program, and replace the contents of the code mirror editor
+*** Best way to store them?
+- keep sample programs in text files
+- load them when selected
+- we need a map that maps program names to the programs in the editor slot
+*** choose good samples
+- decide 5 programs that would do a good job showing off the language
+  and the visualizers

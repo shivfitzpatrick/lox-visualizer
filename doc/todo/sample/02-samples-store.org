@@ -1,0 +1,118 @@
+#+title: Sample Store — Files, Map, Lazy Loading
+#+date: 2026-08-11
+#+phase: 1
+#+TODO: TODO NEXT IN-PROGRESS WAITING | DONE CANCELLED
+
+Decision (2026-08-11): samples are *bundled and lazy-loaded* via
+~import.meta.glob~ + ~?raw~, not fetched from ~static/~.  Rationale:
+type-checked name→loader map, no fetch/404 error path, samples version
+in lockstep with the interpreter they demo.  Precedent:
+~app/src/python-visualizer/py-core.ts:2~ imports ~emitter.py?raw~.
+
+* Design
+
+** Files
+
+~app/src/lox-visualizer/samples/*.lox~ — one program per file (see
+~04-choose-samples.org~ for the five programs).
+
+** The map
+
+~app/src/lox-visualizer/samples/index.ts~:
+
+#+begin_src typescript
+  import type { SampleProgram } from '@/compiler-viz/layout';
+
+  const modules = import.meta.glob('./*.lox', {
+      query: '?raw',
+      import: 'default',
+  }) as Record<string, () => Promise<string>>;
+
+  function sample(label: string, file: string): SampleProgram {
+      const load = modules[`./${file}`];
+      if (!load) throw new Error(`missing sample: ${file}`);
+      return { label, load };
+  }
+
+  // Array, not object: dropdown order should be deliberate, not
+  // filesystem order.
+  export const loxSamples: SampleProgram[] = [
+      sample('Fibonacci', 'fibonacci.lox'),
+      sample('Closures', 'closures.lox'),
+      sample('Classes & inheritance', 'inheritance.lox'),
+      sample('Scopes & shadowing', 'scopes.lox'),
+      sample('Loops & strings', 'star-triangle.lox'),
+  ];
+#+end_src
+
+The ~throw~ runs at module init, so a renamed file fails loudly on
+first page load / in tests rather than as a dead dropdown entry.
+(~import.meta.glob~ keys are literal, so a typo is otherwise silent.)
+
+~SampleProgram~ lives in *compiler-viz*, not here — see
+~03-dropdown-ui.org~.  The kit must not import Lox-specific modules.
+
+** Type declarations
+Mirror ~app/src/types/pyodide.d.ts:12~ if TS complains about the glob
+result; the ~as Record<...>~ cast may make an ambient decl for
+~*.lox?raw~ unnecessary since ~import.meta.glob~ itself is typed by
+~vite/client~.  If a decl *is* added, remember the stream-01 lesson:
+~tsconfig.test.json~ needs ~exclude: []~ so ambient decls stay in the
+test project.
+* Tasks
+** DONE Create ~samples/~ with placeholder files and ~index.ts~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/samples/
+   :END:
+
+Placeholder one-liners are fine until 04 lands the real programs; the
+infrastructure and UI streams shouldn't block on program curation.
+
+** DONE Verify chunk emission and lazy loading (closed by 03, 2026-08-11)
+   :PROPERTIES:
+   :files:    vite.config.js
+   :END:
+
+~import.meta.glob~ without ~eager~ makes each ~.lox~ its own chunk.
+With ~chunkFileNames: '[name].js'~ these land at the top of
+~app/dist/~ (served as ~/app/<name>.js~).  Build and check:
+
+- chunks are emitted and their import paths resolve from
+  ~/app/lox-visualizer/lox-visualizer.js~ in the browser (network tab:
+  selecting a sample triggers exactly one chunk fetch, second
+  selection none)
+- names don't collide with the two entry dirs
+
+Fallback if chunk pathing is troublesome: ~eager: true~ inlines all
+five programs (~<1 KB total) into the entry — the map becomes
+name→string and the dropdown code barely changes.  Acceptable
+deviation; note it here if taken.
+
+* Done when
+
+~loxSamples~ exports five entries; awaiting any entry's ~load()~ in a
+vitest run and in the browser resolves to the file's text.
+
+* Outcome (2026-08-11)
+
+Landed, with the real programs rather than placeholders (04's drafts
+were already written).  Deviations from the design above:
+
+- ~loop_printer.lox~ — the page sample, seeded during the 01 work —
+  is one of the five; the star-triangle draft was dropped as
+  overlapping (loops + print).  Order: Loop printer, Scopes,
+  Fibonacci, Closures, Classes.
+- No ~*.lox?raw~ ambient decl needed.  ~import.meta.glob~ is typed by
+  a scoped ~/// <reference types="vite/client" />~ in
+  ~samples/index.ts~ (tsconfig has no ~types~ array, so vite/client
+  is not auto-included; the triple-slash keeps it out of the global
+  config), and the glob result is cast to
+  ~Record<string, () => Promise<string>>~.
+- Chunk-emission verification is *blocked until 03*: nothing imports
+  ~samples/index.ts~ yet, so it is outside the entry module graph and
+  ~vite build --watch~ emits nothing for it.  Folded into 03's
+  browser-verification task.
+- Tests: ~samples/index.test.ts~ — five uniquely-labelled entries,
+  each ~load()~ resolves to non-empty text, ~loop_printer~ contains
+  the page program.  ~make typecheck~ clean on both projects; vitest
+  left to the running ~make dev~ watcher.

@@ -1,0 +1,65 @@
+#+title: Console Panel Selection — Open Questions
+#+date: 2026-06-19
+
+Notes on how the console panel participates in cross-panel selection, and
+what is under-specified before any work proceeds.
+
+* Current behaviour
+
+~ConsolePanel.onSelectionChange~ matches console output lines by a single
+~[data-src-offset="${state.selectedStart}"]~ query.  The two directions:
+
+- *Instruction click → console*: ~selectedStart = instr.srcOffset~; if a
+  print line shares that offset, it gets ~console-selected~.  A
+  ~console ↔ bc~ connector line is drawn.
+- *Console line click → bc*: writes ~selectedStart = srcOffset~, no
+  ~selectedAstNode~.  The AST panel resolves the node via ~findNodeForOffset~
+  and writes it back, so the lexer subtree and (after the bytecode subtree
+  fix) bytecode rows also respond.
+
+* What is unclear
+
+** Does Print ~srcOffset~ == Print ~node.start~?
+
+~ConsoleMessage.srcOffset~ is populated by the Lox adapter.  It is not yet
+confirmed whether this value equals the ~start~ of the ~Print~ AST node (the
+~print~ keyword offset) or something else (e.g. the printed expression
+offset, the semicolon, etc.).  This matters for:
+
+- Whether clicking a ~Print~ AST node currently highlights the console output.
+- Whether a subtree fix would cover it, or whether the adapter needs to
+  change too.
+
+** Subtree highlight in the console panel
+
+If you select a ~Function~ or ~While~ that contains ~print~ statements,
+should the console panel highlight all print outputs produced inside that
+block?  This would parallel the bytecode subtree fix.  Questions:
+
+- Is this actually useful?  Console output is associated with runtime
+  execution order, not static AST structure.  Highlighting all outputs "from
+  inside this function" may be confusing if the function is called multiple
+  times.
+- If yes, the fix is the same pattern: use ~collectSubtreeStarts~ when
+  ~selectedAstNode~ is set.
+
+** Missing ast↔console connector
+
+The connector topology (~connectorLinesForLayout~) has ~ast↔lexer~,
+~ast↔bc~, ~console↔bc~ but no ~ast↔console~.  If clicking a ~Print~ AST
+node highlights the console output (confirmed or fixed), a connector line
+would be needed for the visual to be complete.
+
+~ConsolePanel~ would need to call ~setAnchor~ (it currently does for the
+~console↔bc~ line) and a new anchor id / connector pair added.
+
+* Things to establish before proceeding
+
+1. Trace where ~ConsoleMessage.srcOffset~ is set in the Lox adapter (~lox-data.ts~
+   or ~lox-core.ts~) and confirm what source position it represents.
+2. Manually verify: run a ~print 1;~ program, click the ~Print~ AST node —
+   does the console output line highlight?
+3. Decide whether subtree-based console highlight is desirable given the
+   runtime-vs-static ambiguity above.
+4. If proceeding, decide whether the ~ast↔console~ connector belongs in the
+   default layout or only in layouts that explicitly include both panels.

@@ -1,0 +1,436 @@
+#+title: Multi-Language Visualizer UI — Design
+#+date: 2026-06-18
+
+* Goal
+
+Reuse the Lox visualizer's UI shell — layout mount, editor slot, connector
+overlay, and stage panels — for a *Python* compilation/execution post (and
+future languages) without duplicating d3 rendering, store wiring, or CSS.
+
+Success looks like:
+
+1. A second blog post that supplies only a ~ ```python … ``` ~ sample block and
+   a module script tag, same ergonomics as [[file:../arch-refactor/14-post-markup.org][14-post-markup.org]].
+2. The cloxvis post keeps working unchanged while both posts share one UI
+   implementation.
+3. Language-specific work stays in a thin *adapter* (event accumulation,
+   derivation, runtime bridge) — not in the panels.
+
+Platform feasibility for Python (stdlib introspection, Pyodide, span linking)
+is documented separately in [[file:../../python/design-doc.org][doc/python/design-doc.org]].
+*This* doc covers the TypeScript/UI side: what to extract, what stays
+language-specific, and how to wire a new post.
+
+* Current state (after the arch refactor)
+
+The Phase 1–4 refactor (~doc/lox-visualizer-architecture.org~,
+~doc/todo/arch-refactor/~) already separated concerns inside
+~app/src/lox-visualizer/~:
+
+| Layer | Files | Status |
+|-------+-------+--------|
+| Reactive stores | ~lib/store.ts~ | Generic |
+| Connector overlay | ~connector-layer.ts~ | Generic (per-instance, not singleton) |
+| Panel base + lifecycle | ~visualization-panel.ts~ | Generic shape; types are Lox-named |
+| Layout + mount | ~layout.ts~, ~mount.ts~ | Generic shape; names/CSS are ~lox-*~ |
+| Stage panels | ~panels/*.ts~ | Generic logic; bound to ~LoxData~ |
+| Pure renderers | ~ast.ts~, ~bytecode.ts~ | Mostly generic; ~AstNode~ is already language-neutral |
+| Editor slot | ~slots/editor-slot.ts~ | Generic |
+| Orchestrator | ~lox-visualizer.ts~ | Lox-specific (WASM, ~LoxState~, event handlers) |
+| Data derivation | ~lox-data.ts~, ~state/state.ts~ | Lox-specific |
+| Runtime bridge | ~lox-core.ts~, WASM | Lox-specific |
+
+The *interaction model* is already portable: ~selectedStart~ (a source offset)
+is the cross-panel key; panels write/read it through a store; the connector
+layer draws declared lines between anchor ids.  That design ports directly to
+Python once each stage exposes a flattenable source position (see the Python
+feasibility doc).
+
+What is *not* portable yet is mostly *naming and import paths*, not behavior.
+
+* What remains Lox-coupled
+
+** Type names and store payloads
+
+~LoxData~, ~LoxDataStore~, and ~deriveLoxData(state: LoxState)~ tie every panel
+to the Lox event pipeline.  ~VisualizationPanel~ subscribes to
+~Store<{ data: LoxData | null }>~.
+
+** DOM/CSS namespace
+
+Mount and layout emit ~.lox-visualizer~, ~.lox-panel--lexer~, ~lox-run-button~,
+etc.  CSS lives in ~static/css/lox-visualizer-demo.css~.  A Python post could
+reuse these class names (works, but reads oddly) or we rename to a neutral
+~.compiler-viz~ prefix.
+
+** Panel registry and orchestrator package path
+
+~createPanelRegistry~ hard-wires Lox panel classes.  ~LoxVisualizer.fromPage~
+loads WASM and registers clox event handlers.  There is one Vite entry:
+~lox-visualizer/lox-visualizer.ts~.
+
+** Token coloring
+
+~LexerPanel~ imports ~TokenCategory~ and ~TOKEN_TYPE_MAP~ from
+~state/token.ts~ (Lox token enum → category).  Python needs its own category
+map (~tokenize.tok_name~ → highlight bucket).
+
+** Bytecode row shape
+
+~BytecodePanel~ and ~drawBytecode~ expect ~CompilerEvent~ (~src_offset~,
+~chunk~, ~op~, …).  Python ~dis.Instruction~ fields differ in name but map
+cleanly once normalized.
+
+** AST construction
+
+~AstNode~ / ~drawAst~ are already generic tree types.  Only the *builder* that
+turns parser events into a tree (~LoxState.parse()~) is Lox-specific.  A Python
+adapter can build the same ~AstNode~ shape from ~ast.parse~ + ~ast.iter_fields~.
+
+* Target architecture
+
+Split the tree into three layers:
+
+#+begin_example
+app/src/
+  lib/                          (unchanged — store, component, styles)
+  compiler-viz/                 (NEW — shared UI, language-agnostic)
+    types.ts                    VizData, VizSelection, Lexeme, Instruction, …
+    theme.ts                    ColorScheme (moved from lox-visualizer)
+    connector-layer.ts          (moved)
+    visualization-panel.ts      (moved; VizDataStore types)
+    layout.ts                   PanelKind, VisualizerLayout, registry *types*
+    mount.ts                    buildLayoutDOM, findCodeAnchor, mountVisualizer
+    ast.ts                      (moved)
+    bytecode.ts                 (moved)
+    panels/                     lexer, ast, bytecode, console (moved)
+    slots/                      editor-slot (moved)
+  lox-visualizer/               (THIN — Lox adapter + entry)
+    lox-core.ts
+    events.ts
+    state/
+    lox-data.ts                 deriveVizData(state) → VizData
+    lox-visualizer.ts           orchestrator only
+  python-visualizer/            (NEW — Python adapter + entry)
+    py-core.ts                  Pyodide worker or precomputed JSON loader
+    py-data.ts                  deriveVizData from Python events
+    python-visualizer.ts        orchestrator
+#+end_example
+
+Each language package exports one ~fromPage({ layout, codeSelector })~ entry
+that:
+
+1. Mounts shared DOM via ~compiler-viz/mount~.
+2. Creates the three stores (~data~, ~console~, ~selection~).
+3. Instantiates the *shared* panel registry (same classes for every language).
+4. Owns the runtime bridge and event → state → ~deriveVizData~ loop.
+
+#+begin_example
+  Blog post                    Language entry              Shared UI
+  ─────────                    ──────────────              ─────────
+  ```python```  ──script──►  python-visualizer.ts  ──►  compiler-viz/*
+  ```nil```     ──script──►  lox-visualizer.ts     ──►  compiler-viz/*
+#+end_example
+
+* Generic data contract
+
+Rename ~LoxData~ → ~VizData~ (keep ~LoxData~ as a deprecated alias during
+migration).  The snapshot is the only thing panels consume.
+
+#+begin_src typescript
+/** One highlighted source token (lexer panel). */
+export interface Lexeme {
+    start: number;          // absolute UTF-16 or UTF-8 byte offset — pick one convention
+    length: number;
+    text: string;
+    category: TokenCategory | null;
+}
+
+/** Tree node (ast panel). Already matches drawAst. */
+export interface AstNode { /* unchanged */ }
+
+/** One bytecode row (bytecode panel). Neutral names; adapter maps platform fields. */
+export interface Instruction {
+    chunk: string;          // code object name / Lox chunk key
+    offset: number;         // bytecode offset within chunk
+    op: string;
+    srcOffset: number;      // flattened source key (was src_offset)
+    arg?: number;
+    constant?: string;
+    // … platform-specific extras live in attrs?: Record<string, unknown>
+}
+
+export interface VizData {
+    lexemes: Lexeme[];
+    ast: AstNode;
+    chunks: Map<string, Instruction[]>;
+}
+
+export interface VizSelection {
+    selectedStart: number | null;
+    selectedAstNode: AstNode | null;
+}
+
+export type VizDataStore = Store<{ data: VizData | null }>;
+export type ConsoleStore = Store<{ messages: ConsoleMessage[] }>;
+#+end_src
+
+** Position normalization (Python-specific adapter concern)
+
+Lox uses a single absolute ~start~ everywhere.  Python natively uses
+~(line, col, endLine, endCol)~ spans and mixes byte vs character columns
+(tokenize vs ast/dis).  The *adapter* normalizes every stage to one ~start~
+(and ~length~ where needed) before writing ~VizData~:
+
+- Build a line-start offset table from the source text once per run.
+- Flatten spans to absolute offsets using a single convention (recommend UTF-16
+  code units to match JavaScript string indexing in the editor).
+- Document the convention in ~compiler-viz/types.ts~ so adapters stay consistent.
+
+Panels and connectors never see line/column tuples.
+
+** Console messages
+
+Keep ~ConsoleMessage~ generic (~{ type: 'print' | 'error'; text; offset? }~).
+Lox fills ~offset~ from ~PrintEvent.src_offset~; Python from trace/monitoring
+position flattening.
+
+* Shared UI components (what moves to ~compiler-viz/~)
+
+These files move with minimal edits (import path + type renames):
+
+| Component | Notes |
+|-----------+-------|
+| ~connector-layer.ts~ | Unchanged |
+| ~visualization-panel.ts~ | ~LoxData~ → ~VizData~, ~VisualizerSelection~ → ~VizSelection~ |
+| ~mount.ts~ | Parameterize root class name (~compiler-viz~ vs legacy ~lox-visualizer~) |
+| ~layout.ts~ | Split: *types* + ~validateLayout~ + ~connectorLinesForLayout~ stay shared; ~createPanelRegistry~ moves to each language entry OR accepts injected factories |
+| ~panels/*~ | Import ~VizData~; lexer panel accepts ~TokenCategoryMap~ via ctor or module config |
+| ~slots/editor-slot.ts~ | Optional: CodeMirror language mode extension point (~python~ vs plain) |
+| ~ast.ts~, ~bytecode.ts~ | Unchanged signatures modulo ~Instruction~ rename |
+| ~theme.ts~ | Shared default palette; languages may override |
+
+** Panel registry pattern
+
+Prefer a single shared registry factory:
+
+#+begin_src typescript
+export function createDefaultPanelRegistry(
+    ctx: PanelContext<VizData>,
+    tokenMap: TokenCategoryMap,
+): PanelRegistry { … }
+#+end_src
+
+~LoxVisualizer~ passes ~LOX_TOKEN_MAP~; ~PythonVisualizer~ passes
+~PYTHON_TOKEN_MAP~.  Panel *classes* stay identical.
+
+** Connector topology
+
+~connectorLinesForLayout~ is already pure and language-agnostic.  Anchor ids
+(~lexer~, ~ast~, ~bc~, ~console~) stay stable across languages.
+
+* Language adapters
+
+** Lox (existing)
+
+Keep ~LoxState~ event accumulation and ~deriveLoxData~; rename output type to
+~VizData~.  ~lox-visualizer.ts~ shrinks to WASM wiring + ~fromPage~.  No
+behavior change for cloxvis.
+
+** Python (new)
+
+See [[file:../../python/design-doc.org][doc/python/design-doc.org]] for introspection details.  Adapter responsibilities:
+
+1. *Runtime* — Pyodide in the browser (preferred parity with Lox WASM) or
+   server-side precompute embedded as JSON on first Run.
+2. *Event emission* — Python script (~tokenize~ → ~ast~ → ~dis~) outputs the
+   same logical stages as clox events, or writes ~VizData~ JSON directly.
+3. *Normalization* — span → ~start~, nested code objects → ~chunks~ map,
+   token categories → ~TokenCategory~.
+4. *Optimizer gap* — many-to-one / zero instruction ↔ AST node mappings;
+   panels already tolerate missing bytecode rows; document UX for Python (link
+   to *smallest enclosing* AST node by span).
+
+Execution tracing (~sys.monitoring~) is a follow-on panel kind, not required for
+the first Python post.
+
+* Blog post integration
+
+** Author-facing markup
+
+Mirror cloxvis: prose, one module script, one fenced sample block — no hand-planted panel divs.
+
+#+begin_example
+<script src="/app/python-visualizer/python-visualizer.js" type="module"></script>
+
+```python
+x = 1 + 2
+print(x)
+```
+#+end_example
+
+** Per-post configuration
+
+Each entry module sets mount options at the bottom (same pattern as today):
+
+#+begin_src typescript
+const app = PythonVisualizer.fromPage({
+    layout: DEFAULT_LAYOUT,
+    codeSelector: '.language-python',
+});
+if (app) void app.setUp();
+#+end_src
+
+Layouts can differ per post (e.g. omit bytecode on a lexer-only demo) using the
+existing ~VisualizerLayout~ type.
+
+** CSS
+
+Phase A (low risk): Python post imports the same
+~static/css/lox-visualizer-demo.css~; class names stay ~lox-*~.
+
+Phase B (cleanup): Rename selectors to ~.compiler-viz~ / ~.viz-panel--*~;
+keep ~.lox-visualizer~ as an alias during migration so cloxvis needs no
+immediate CSS edit.
+
+** Build
+
+Add a second Vite input in ~vite.config.js~:
+
+#+begin_src javascript
+input: {
+    'lox-visualizer/lox-visualizer': '…/lox-visualizer/lox-visualizer.ts',
+    'python-visualizer/python-visualizer': '…/python-visualizer/python-visualizer.ts',
+},
+#+end_src
+
+Shared ~compiler-viz~ code lands in a shared chunk automatically (Rollup
+dedupes imports).  External WASM/JS paths stay per-language (~lox.js~ vs
+Pyodide loader).
+
+** Hugo / content-org
+
+- New post under ~content/posts/~ (and export block in ~content-org/posts.org~).
+- Script path points at the python entry bundle.
+- Fenced block language tag ~python~ (Chroma/highlight class
+  ~.language-python~).
+
+* Phased work plan
+
+Work streams are ordered; items marked *parallel* can proceed independently
+once their gate lands.
+
+** Phase 0 — Gate: finish layout refactor (if not already on main)
+
+Complete ~doc/todo/arch-refactor/13–14~ so cloxvis mounts from the sample block
+only.  Multilang extraction builds on the mount/layout/registry work — do not
+fork panels before that cutover is stable.
+
+** Phase 1 — Generic types without moving files *parallel*
+
+Task breakdown: [[file:00-overview.org][doc/todo/multilang/00-overview.org]] and
+streams [[file:01-viz-data-types.org][01]] · [[file:02-instruction-type.org][02]] ·
+[[file:03-token-category-map.org][03]].
+
+| Task | Outcome |
+|------+---------|
+| Introduce ~VizData~ / ~VizSelection~ in ~lox-data.ts~ | Type aliases; ~LoxData = VizData~ temporarily |
+| Rename ~CompilerEvent.src_offset~ → adapter maps to ~Instruction.srcOffset~ in derivation only | Panels stop importing ~events.ts~ |
+| Extract ~TokenCategoryMap~ as injectable config | Lexer panel decoupled from Lox enum file |
+
+No blog post changes.  cloxvis behavior unchanged.
+
+** Phase 2 — Extract ~compiler-viz/~ package
+
+| Task | Outcome |
+|------+---------|
+| Move shared files (see layout above) | ~lox-visualizer/*~ re-exports or imports from ~compiler-viz/~ |
+| Parameterize ~mount.ts~ root class (~compilerVizClass~ option, default ~lox-visualizer~) | Backward compatible |
+| ~createDefaultPanelRegistry(ctx, tokenMap)~ | Shared registry |
+| Update imports in ~lox-visualizer.ts~ | Thin orchestrator |
+| Move/adjust tests (~layout.test.ts~, ~mount.test.ts~, ~connector-layer.test.ts~, panel tests) | Test paths follow files |
+
+** Phase 3 — Python adapter skeleton *parallel with Phase 2 tail*
+
+| Task | Outcome |
+|------+---------|
+| ~python-visualizer/py-data.ts~ — ~deriveVizData~ from mock/fixture JSON | Unit tests without Pyodide |
+| ~python-visualizer/python-visualizer.ts~ — ~fromPage~ wired to shared panels | Mounts DOM; shows fixture data on Run |
+| Vite entry + stub post (draft) | Proves second bundle + ~.language-python~ selector |
+
+** Phase 4 — Python runtime
+
+| Task | Outcome |
+|------+---------|
+| Pyodide bootstrap in ~py-core.ts~ | Load interpreter, run introspection script |
+| Python emitter script (stdlib ~tokenize~ / ~ast~ / ~dis~) | JSON → ~VizData~ |
+| Position normalizer + ~PYTHON_TOKEN_MAP~ | Correct linking on ASCII and Unicode samples |
+| Span↔instruction UX for optimized bytecode | Smallest-enclosing-node policy |
+
+** Phase 5 — Polish for publication
+
+| Task | Outcome |
+|------+---------|
+| CSS rename (optional Phase B) | Neutral ~compiler-viz~ classes |
+| Editor Python syntax mode (CodeMirror ~lang-python~) | Nice-to-have |
+| Published post + content-org sync | Matches cloxvis ergonomics |
+| Cross-browser check (Pyodide size/load) | Document cold-start expectations |
+
+* Dependency graph
+
+#+begin_example
+arch-refactor 13–14 (gate)
+        │
+        ▼
+Phase 1 generic types
+        │
+        ▼
+Phase 2 extract compiler-viz ──┬──► Phase 5 polish
+        │                        │
+        └──────► Phase 3 Python skeleton
+                        │
+                        ▼
+                 Phase 4 Pyodide runtime
+#+end_example
+
+* Non-goals (for the first Python post)
+
+- Operand-stack panel (see Python feasibility doc — reconstruct or omit).
+- ~symtable~ panel (possible later ~PanelKind~ extension).
+- A single combined bundle that auto-detects language from the fenced block
+  (two explicit script tags per post is simpler and smaller).
+- Rewriting d3 renderers — they already accept generic tree/table shapes.
+
+* Open questions
+
+1. *CSS namespace* — rename to ~compiler-viz~ in Phase 2 or defer to Phase 5?
+   Renaming early avoids a second migration but touches cloxvis CSS/tests.
+2. *Offset convention* — UTF-16 (JS-native) vs UTF-8 bytes (matches
+   ~ast.col_offset~)?  Pick one in ~types.ts~ and test with a non-ASCII sample.
+3. *Pyodide bundle size* — acceptable for a long-form post?  Fallback: Run
+   hits a build-time precomputed JSON for the sample program, Pyodide only when
+   the user edits source.
+4. *Console panel on Python* — reuse print tracing via ~sys.monitoring~ or
+   start with stderr-only errors from ~compile()~ / ~exec()~?
+5. *Bytecode panel label* — keep "bytecode" kind name for Python (~dis~ output)
+   or add an alias kind ~instructions~ with the same panel class?
+
+* Verification checklist
+
+Before merging the Python post:
+
+- [ ] cloxvis post: same layout, connectors, selection, Run — no regressions.
+- [ ] Python post: mount from ~ ```python ``` ~ only; no legacy ~#lox-*~ divs.
+- [ ] Click AST node → lexer subtree highlight + ast↔lexer connector.
+- [ ] Click bytecode row → ast highlight + ast↔bc connector (when row exists).
+- [ ] Optimized bytecode: AST node with no instruction does not throw; connector
+      gracefully absent.
+- [ ] Two visualizers on one page (if ever needed): separate connector layers
+      (already per-root) — spot-check no id collisions (~panelShellId~ is per-kind,
+      not per-instance; acceptable if only one viz per page).
+
+* References
+
+- [[file:../../lox-visualizer-architecture.org][Lox Visualizer Architecture]] — store, panels, connectors design
+- [[file:../arch-refactor/00-overview.org][Arch refactor overview]] — current file layout and phases
+- [[file:../../python/design-doc.org][Python Platform Visualizer]] — stdlib introspection, Pyodide, linking caveats

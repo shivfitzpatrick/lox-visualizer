@@ -1,0 +1,325 @@
+#+title: Python Platform Visualizer — Feasibility & Design
+#+date: 2026-06-18
+
+* Goal
+
+Build a Lox-visualizer-style tool for other language platforms, starting with
+Python: show the lexed tokens, the AST, the bytecode instructions, and the
+live execution of a piece of source, with the stages visually connected so the
+user can trace any construct from source → token → AST node → instruction →
+execution.
+
+This doc records the feasibility findings for Python and the design
+implications of porting the Lox approach.
+
+* How the Lox visualizer connects stages (the thing we must replicate)
+
+Every stage in the Lox tool carries a *source offset*, and that offset is the
+shared key the connector layer uses to draw lines between panels.
+
+| Stage    | Type                  | Linking field        |
+|----------+-----------------------+----------------------|
+| Lexer    | =Lexeme=              | =start=, =length=    |
+| Parser   | =ParserEvent=         | =start=              |
+| AST      | =AstNode=             | =start=              |
+| Compiler | =CompilerEvent=       | =src_offset=         |
+
+=ConnectorLayer= draws a line between two panels' anchor rects whenever they
+represent the same selection. The selection key (=selectedStart=) is a source
+offset that came from the compiler output. So the only hard requirement for a
+new platform is: *each stage must expose a common source-position key.*
+
+* Feasibility verdict for Python
+
+CPython already produces everything needed, exposed through the *standard
+library*, with *no compiler instrumentation required*. This is materially
+easier than Lox, where clox (C) had to be instrumented to emit events.
+
+The one structural difference: CPython tags each stage with source *positions*
+as =(line, col, end_line, end_col)= spans rather than a single absolute byte
+offset. That is strictly more information than the Lox =start=; it can be
+flattened to an absolute offset with a line-start table to reuse the existing
+offset-based connector logic verbatim.
+
+All output below was confirmed empirically on Python 3.14.4.
+
+** Target version: 3.11+
+
+Per-instruction column positions (PEP 657) landed in *Python 3.11*. Before
+3.11, bytecode carried only per-instruction line numbers — no columns — so
+bytecode→source linking would be line-granular only. Target 3.11 or newer to
+get span-level linking across all three stages.
+
+* What each stage provides
+
+** 1. Lexed tokens — =tokenize=
+
+#+begin_src python
+import tokenize, io
+for t in tokenize.generate_tokens(io.StringIO(src).readline):
+    # t.exact_type, t.string, t.start=(row,col), t.end=(row,col), t.line
+    ...
+#+end_src
+
+Yields token type, literal text, and precise start/end =(row, col)=. Direct
+analog of =Lexeme= (=start=, =length=, =type=). =tokenize.tok_name= plus the
+=token= module categories let us build the equivalent of =TokenCategory= /
+=TOKEN_TYPE_MAP= for syntax coloring.
+
+** 2. AST — =ast=
+
+#+begin_src python
+tree = ast.parse(src)
+# every node: node.lineno, node.col_offset, node.end_lineno, node.end_col_offset
+ast.dump(tree, include_attributes=True)
+#+end_src
+
+Every node carries a full source *span* (=end_*= attributes since 3.8). This is
+=AstNode= with =start=, but richer — highlighting a node can highlight an exact
+source range. Node =type= is the class name (=BinOp=, =Call=, =Assign=…);
+children are named fields, which maps onto the =childType= edge labels.
+
+** 3. Bytecode — =dis= / =compile()=
+
+#+begin_src python
+code = compile(src, "<viz>", "exec")
+for inst in dis.get_instructions(code, adaptive=False):
+    # inst.offset, inst.opname, inst.arg, inst.argval, inst.argrepr,
+    # inst.positions -> Positions(lineno, end_lineno, col_offset, end_col_offset)
+    ...
+#+end_src
+
+Since 3.11, every instruction carries fine-grained =positions= (also available
+via =code.co_positions()=). Maps onto =CompilerEvent= (=offset=, =op=, =arg=,
+=constant=, =src_offset=), with =positions= playing the role of =src_offset=.
+
+* Worked example
+
+Source:
+
+#+begin_src python
+x = 1 + 2
+print(x)
+#+end_src
+
+Tokens (type, text, start, end):
+
+#+begin_example
+NAME 'x'      (1,0) (1,1)
+EQUAL '='     (1,2) (1,3)
+NUMBER '1'    (1,4) (1,5)
+PLUS '+'      (1,6) (1,7)
+NUMBER '2'    (1,8) (1,9)
+NAME 'print'  (2,0) (2,5)
+...
+#+end_example
+
+AST (node, start, end):
+
+#+begin_example
+Assign    (1,0) (1,9)
+BinOp     (1,4) (1,9)
+Constant  (1,4) (1,5)
+Constant  (1,8) (1,9)
+Call      (2,0) (2,8)
+Name      (2,0) (2,5)
+#+end_example
+
+Bytecode (offset, op, positions):
+
+#+begin_example
+2  LOAD_SMALL_INT   cols 4..9   <- note: "1 + 2" already folded
+4  STORE_NAME x     cols 0..1
+6  LOAD_NAME print  cols 0..5
+10 LOAD_NAME x      cols 6..7
+12 CALL             cols 0..8
+#+end_example
+
+Linking is by source-span containment/overlap: instruction span ⊆ AST node
+span ⊆ token spans. The Lox connector mechanism ports over directly.
+
+* Differences and caveats to design around
+
+** Bytecode optimization breaks the clean 1:1 mapping (biggest difference)
+
+CPython constant-folds and optimizes before emitting, unlike the single-pass
+Lox compiler. In the example, =1 + 2= never produces an =ADD= — it becomes one
+=LOAD_SMALL_INT= whose span covers the whole subexpression. Consequences:
+
+- Some AST nodes (=BinOp=, the two =Constant=s) have *no* corresponding
+  instruction.
+- One instruction can map to a multi-node source span.
+
+The UI must handle many-to-one and zero-instruction-per-node honestly, e.g.
+link an instruction to the *smallest enclosing* AST node by span. This is the
+one genuinely new design problem versus Lox.
+
+** Nested code objects
+
+Functions, comprehensions, lambdas, and classes each compile to their own
+nested =code= object (in =code.co_consts=); recurse into them. This parallels
+the Lox =chunks: Map<string, CompilerEvent[]>= design — each code object is a
+"chunk."
+
+** (line, col) vs absolute offset, and byte-vs-char
+
+=ast.col_offset= and =co_positions= columns are *UTF-8 byte* offsets;
+=tokenize= columns are *character* offsets. Identical for ASCII, divergent for
+non-ASCII source. Normalize to one convention if Unicode source is supported.
+
+** positions can be None
+
+Synthetic instructions, or code compiled with =-X no_debug_ranges= /
+=PYTHONNODEBUGRANGES=, yield =None= positions. Handle the null case (the
+connector already tolerates null anchors).
+
+** Bytecode is version-volatile
+
+Opcodes change every minor release (3.11+ specializing adaptive interpreter,
+ongoing churn; 3.14 here even has =LOAD_SMALL_INT=). Pin a target version. Use
+=dis.get_instructions(code, adaptive=False)= for the stable, non-specialized
+form.
+
+* Bonus stages Python exposes that Lox does not
+
+- *Symbol table* via the =symtable= module — scopes and variable binding
+  (local/global/free/cell). Could be a panel Lox has no equivalent for.
+- CPython does *not* expose its concrete parse tree (PEG parser CST) or its
+  internal compiler CFG/IR. Only the abstract AST is available — which is all
+  the visualization needs.
+
+* Stage 4: execution tracing (live VM state)
+
+A further desired stage: visualize the *running* program — watch instructions
+execute one at a time and keep attributing each executed instruction back to the
+AST node / lexer tokens that produced it.
+
+** Verdict
+
+Yes, the executed-instruction stream is fully attributable. CPython lets us
+observe execution at *per-instruction* granularity, and each executing
+instruction reports its bytecode offset, which we already map to a source span
+(stage 3) and therefore to the AST node and tokens. The same source-span key
+that links the static stages also links the dynamic one — confirmed
+empirically on 3.14.4.
+
+The important limitation: the *operand (value) stack* — the VM's working stack
+that instructions push/pop — is *not* exposed to pure Python. Locals, globals,
+the current instruction, and the source position are all available for free.
+
+** How: =sys.monitoring= INSTRUCTION events (3.12+, recommended)
+
+PEP 669 added a low-overhead monitoring API. Register a callback for the
+=INSTRUCTION= event and receive =(code, instruction_offset)= for every
+instruction as it executes.
+
+#+begin_src python
+import sys, dis
+m = sys.monitoring
+pos_by_off = {i.offset: i.positions for i in dis.get_instructions(code)}
+
+TID = m.DEBUGGER_ID
+m.use_tool_id(TID, "viz")
+def on_instr(c, off):
+    if c is code:
+        # off -> positions -> AST node / tokens (same span key as static stages)
+        report(off, pos_by_off.get(off))
+m.register_callback(TID, m.events.INSTRUCTION, on_instr)
+m.set_events(TID, m.events.INSTRUCTION)
+exec(code, {})
+m.set_events(TID, 0); m.free_tool_id(TID)
+#+end_src
+
+Confirmed output for =x = 1 + 2 / print(x)= — each executed instruction came
+back with usable positions:
+
+#+begin_example
+INSTR off=2  pos=(1, cols 4..9)   # the folded LOAD_SMALL_INT
+INSTR off=4  pos=(1, cols 0..1)   # STORE_NAME x
+INSTR off=6  pos=(2, cols 0..5)   # LOAD_NAME print
+INSTR off=10 pos=(2, cols 6..7)   # LOAD_NAME x
+INSTR off=12 pos=(2, cols 0..8)   # CALL
+#+end_example
+
+Other =sys.monitoring= events are useful for richer execution UI: =LINE=,
+=JUMP=, =BRANCH=/=BRANCH_LEFT=/=BRANCH_RIGHT= (control flow), =PY_START= /
+=PY_RETURN= / =PY_YIELD= (call stack), =RAISE= / =PY_UNWIND= /
+=EXCEPTION_HANDLED= (exceptions), =CALL= / =C_RETURN= (into C functions).
+
+** How: =sys.settrace= + =f_trace_opcodes= (pre-3.12 fallback)
+
+Before 3.12, opcode-level tracing is done by setting =frame.f_trace_opcodes =
+True= in the trace function and reading =frame.f_lasti= (the offset of the last
+attempted instruction) on each =opcode= event. This is the only option on 3.11,
+but it is higher overhead and has frame-setup gotchas. Prefer =sys.monitoring=
+on 3.12+.
+
+** What VM state is observable
+
+| State                       | Exposed to pure Python?                |
+|-----------------------------+----------------------------------------|
+| Current instruction offset  | Yes (=f_lasti= / INSTRUCTION arg)      |
+| Source position of that op  | Yes (via =co_positions=, stage 3)      |
+| Locals                      | Yes (=frame.f_locals=)                 |
+| Globals                     | Yes (=frame.f_globals=)                |
+| Call stack / frames         | Yes (=frame.f_back=, PY_START/RETURN)  |
+| Operand (value) stack       | *No* — needs C-API / =ctypes=          |
+
+So a "watch it execute" panel that steps through instructions, highlights the
+originating source span / AST node, and shows locals as they change is
+straightforward. Showing the operand stack (the values each instruction pushes
+and pops) is the hard part.
+
+** The operand-stack gap
+
+The evaluation stack lives in the C frame and has no pure-Python accessor. Three
+options, in increasing effort:
+
+1. *Don't show it.* Animate token/AST/instruction attribution plus locals. This
+   already conveys the execution story for most teaching purposes.
+2. *Reconstruct it.* Simulate a stack machine by replaying the bytecode and
+   applying each opcode's known stack effect (=dis.stack_effect= gives the net
+   push/pop count per opcode). This yields stack *depth* and, with per-opcode
+   modeling, approximate stack *contents* without touching VM internals.
+   Decouples from CPython internals but must track opcode semantics.
+3. *Read the real stack via C-API / =ctypes=.* Possible but fragile and tightly
+   version-coupled (frame layout changes between releases; under Pyodide/WASM
+   this is even riskier). Not recommended unless exact runtime values are
+   essential.
+
+Recommendation: option 2 (=dis.stack_effect=-based reconstruction) is the best
+fit — it stays in the same "instrument nothing, derive from stdlib" spirit as
+the rest of the design.
+
+** Pyodide note
+
+=sys.monitoring= and =sys.settrace= are interpreter features, so they work under
+Pyodide (CPython/WASM) the same as native — execution tracing can stay
+client-side like the other stages. The =ctypes= operand-stack approach is the
+one piece that may not survive the WASM boundary, reinforcing option 2 above.
+
+* Difficulty assessment
+
+- *Compiler instrumentation needed: none.* Everything is stdlib and
+  pure-Python-callable. Headline result.
+- *Browser story: solved.* Pyodide is CPython compiled to WASM and ships
+  =tokenize= / =ast= / =dis=, so the whole pipeline can run *client-side* like
+  Lox — no backend. (Alternatives: precompute server-side, or a small CPython
+  subprocess.)
+- *Real work* is the adapter plus the optimization gap:
+  1. A ~100-line Python script emitting =LexerEvent= / =ParserEvent= /
+     =CompilerEvent=-equivalent JSON with positions.
+  2. A position→offset normalizer (byte/char, span→start).
+  3. UI/linking logic for the many-to-one and zero instruction↔node cases.
+  4. Recursion over nested code objects into the =chunks= map.
+
+* Open questions / next steps
+
+- Prototype the Python introspection→JSON adapter emitting the existing event
+  schema, as a concrete starting point.
+- Decide Pyodide (client-side) vs precomputed/server execution.
+- Decide how the UI presents the optimizer's lossy AST↔bytecode mapping.
+- Decide whether to add a =symtable= panel.
+- For the execution stage: decide operand-stack strategy (omit vs
+  =dis.stack_effect= reconstruction vs C-API), and how stepping/playback is
+  driven in the UI (=sys.monitoring= callback feeding the event stream).

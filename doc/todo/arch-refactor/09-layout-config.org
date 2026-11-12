@@ -1,0 +1,200 @@
+#+title: Layout Config and Panel Registry
+#+date: 2026-06-18
+#+phase: 4a (first — blocks all other layout work)
+
+Define the *layout specification* — which panes exist, how they are arranged in
+rows, and how the orchestrator maps a pane kind to a concrete class.  This file
+is the gate: every other Phase 4 stream imports the types and naming conventions
+settled here.
+
+* Background
+
+Today the post author hand-plants panel mount points:
+
+#+begin_example
+<script src="…/lox-visualizer.js" type="module"></script>
+<div class="lox-editor-lexer-row">
+```nil … ```
+<div id="lox-lexer" …></div>
+</div>
+<div id="lox-ast" …></div>
+<div id="lox-compiler"></div>
+<div id="lox-console" …></div>
+#+end_example
+
+The orchestrator (~lox-visualizer.ts~) then ~querySelector~s those ids from
+~document.body~, and the editor setup *separately* replaces the ~.language-nil~
+~<pre>~ in place (~setUp~ lines ~133–158~).  Layout, chrome, and mount logic are
+split across three places (post HTML, orchestrator, CSS).
+
+The goal: the post supplies only the sample source (~ ```nil … ``` ~).  The app
+finds that block, builds a single ~.lox-visualizer~ root, and places every pane
+(editor included) into rows it controls.  Which panes appear and how rows are
+composed is *configurable*.
+
+Default layout (matches today's cloxvis post):
+
+| Row | Panes (left → right) |
+|-----+----------------------|
+| 1   | editor, lexer        |
+| 2   | ast                  |
+| 3   | bytecode             |
+| 4   | console              |
+
+* Pane kinds
+
+Not every pane is a ~VisualizationPanel~.  Split into two categories:
+
+| Kind | Role today | Base type |
+|------+------------+-----------|
+| ~editor~ | CodeMirror + Run button | new ~EditorSlot~ (Component) |
+| ~lexer~ | token spans | ~LexerPanel~ |
+| ~ast~ | parse tree | ~AstPanel~ |
+| ~bytecode~ | compiler output table | ~BytecodePanel~ |
+| ~console~ | stdout / print / errors | new ~ConsoleSlot~ (Component) for now |
+
+~stack~ and ~output~ ids exist in the post but are unused — do *not* add them to
+the registry unless a future VM panel lands.
+
+* Target config shape
+
+#+begin_src typescript
+// app/src/lox-visualizer/layout.ts
+
+export type PanelKind = 'editor' | 'lexer' | 'ast' | 'bytecode' | 'console';
+
+/** One horizontal row of panes. Empty rows are skipped. */
+export type LayoutRow = PanelKind[];
+
+/** Full page layout: row 0 is top. */
+export type VisualizerLayout = LayoutRow[];
+
+/** Default for the cloxvis post — editor+lexer share row 1. */
+export const DEFAULT_LAYOUT: VisualizerLayout = [
+    ['editor', 'lexer'],
+    ['ast'],
+    ['bytecode'],
+    ['console'],
+];
+
+/** Options passed when mounting from the page. */
+export interface MountOptions {
+    layout?: VisualizerLayout;
+    /** CSS selector for the sample-code anchor. Default: '.language-nil' */
+    codeSelector?: string;
+}
+
+/** Shared wiring every pane receives. */
+export interface PanelContext {
+    dataStore: LoxDataStore;
+    selectionStore: Store<VisualizerSelection>;
+    connectors: ConnectorLayer;
+    root: HTMLElement;   // the .lox-visualizer element (connector overlay parent)
+}
+
+/** Factory for VisualizationPanel subclasses. */
+export type VizPanelFactory = (
+    kind: Exclude<PanelKind, 'editor' | 'console'>,
+    container: HTMLElement,
+    ctx: PanelContext,
+) => VisualizationPanel;
+
+/** Lifecycle for non-viz slots (editor, console). */
+export interface VisualizerSlot extends Component {
+    readonly slotId: PanelKind;
+}
+#+end_src
+
+* DOM class naming (settled — downstream streams must use these)
+
+| Element | Class | Notes |
+|---------+-------+-------|
+| Root | ~lox-visualizer~ | one per instance; connector overlay parent |
+| Row | ~lox-visualizer-row~ | flex row; replaces ~lox-editor-lexer-row~ |
+| Pane shell | ~lox-panel~ + ~lox-panel--{kind}~ | e.g. ~lox-panel--lexer~ |
+| Editor inner box | ~lox-editor-box~ | unchanged |
+| Editor wrapper | ~lox-editor-container~ | unchanged; holds box + Run button |
+
+Optional stable ids (~id="lox-lexer"~, etc.) may be set on pane shells *for
+debugging and bookmarking* when a layout includes that kind exactly once.  CSS
+must not depend on ids (see 12).
+
+* Tasks
+
+** DONE Create ~layout.ts~ with types and default layout
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/layout.ts (new)
+   :END:
+
+Export ~PanelKind~, ~LayoutRow~, ~VisualizerLayout~, ~DEFAULT_LAYOUT~,
+~MountOptions~, ~PanelContext~, ~VisualizerSlot~ as above.  Add a small
+~validateLayout(layout)~ helper that:
+
+- rejects unknown pane kinds (exhaustive switch),
+- warns or throws on duplicate kinds in one layout (a kind should appear at most
+  once — two lexer panels would share one ~panelId~ anchor and collide),
+- skips empty rows.
+
+** DONE Define ~createPanelRegistry(ctx)~ factory
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/layout.ts (same file)
+   :END:
+
+Return a ~Map<PanelKind, () => VisualizationPanel | VisualizerSlot>~ *or* a
+record of factories keyed by kind.  The registry closes over ~PanelContext~ and
+knows how to construct:
+
+- ~LexerPanel~, ~AstPanel~, ~BytecodePanel~ (existing),
+- ~EditorSlot~, ~ConsoleSlot~ (stubs OK until 11 lands — export placeholder
+  classes that throw ~'not implemented'~ if constructed early).
+
+The orchestrator (13) calls the registry after mount returns containers; it
+should not import panel classes directly except through this map.
+
+** DONE Declare connector topology per layout
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/layout.ts
+   :END:
+
+Move connector ~addLine~ declarations out of the orchestrator constructor body
+into a ~declareConnectors(connectors, layout, colors)~ helper:
+
+- ~ast↔lexer~ line only when *both* ~'ast'~ and ~'lexer'~ appear in the layout.
+- ~ast↔bc~ line only when *both* ~'ast'~ and ~'bytecode'~ appear.
+
+This keeps a reduced layout (e.g. lexer-only demo) from registering dead lines.
+
+** DONE Document the mount result type
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/layout.ts
+   :END:
+
+#+begin_src typescript
+export interface MountResult {
+    root: HTMLElement;                          // .lox-visualizer
+    containers: Map<PanelKind, HTMLElement>;  // pane shell per kind
+    sampleCode: string;                       // text extracted from the pre/code
+}
+#+end_src
+
+~10-layout-mount.org~ implements ~mountVisualizer(anchor, layout)~ returning this.
+The orchestrator passes ~MountResult.root~ as the connector parent and looks up
+containers from the map.
+
+* Open questions
+
+- *Where does a page override ~DEFAULT_LAYOUT~?*  Options: (a) constant in
+  ~lox-visualizer.ts~ module entry (simplest — change the constant per post);
+  (b) ~data-layout~ JSON on the ~<script>~ tag (flexible, needs a parser);
+  (c) a second exported ~mount~ function posts call explicitly.  Recommend (a)
+  for now; note (b) as a follow-up in 13 if desired.
+- *Multiple visualizers on one page:* ~mount~ should accept an explicit anchor
+  element so each ~.language-nil~ block can spawn its own ~.lox-visualizer~.
+  The module entry uses the *first* match; document that contract.
+
+* Acceptance
+
+- ~layout.ts~ exists, exports all types, ~DEFAULT_LAYOUT~ matches the table
+  above, ~validateLayout~ catches duplicate kinds.
+- No runtime DOM changes yet — types + registry skeleton only.
+- Downstream streams (10, 11, 12) can import ~layout.ts~ without circular deps.

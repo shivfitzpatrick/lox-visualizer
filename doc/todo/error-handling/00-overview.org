@@ -1,0 +1,90 @@
+#+title: Crash Resilience — Overview
+#+date: 2026-08-03
+#+TODO: TODO NEXT IN-PROGRESS WAITING | DONE CANCELLED
+
+This directory breaks ~crash-resilience.org~ into work streams.  Each numbered
+file is self-contained and meant to be done in order by one person or agent.
+
+Sibling document ~design.org~ (2026-06-19) plans *where* errors are displayed —
+a dedicated Errors pane split out of the console.  This set of streams plans
+*what happens to the app* when the WASM module fails.  The two are independent;
+see "Relationship to design.org" below.
+
+* Goal end-state
+
+1. A compile or runtime error in the user's Lox program is an ordinary result,
+   not a JavaScript exception.  The visualizer stays fully interactive: Build
+   button live, trace published up to the failure point, fix-and-rerun works.
+2. A genuine trap (C stack overflow, OOB write) is reported *as a crash*, with
+   the Build button disabled visibly and for a stated reason.
+3. Emscripten's internal diagnostics never reach the reader-facing panels.
+4. A non-terminating program produces a message instead of freezing the tab.
+
+* Phases and parallelism
+
+** Phase 0 — Stop the bleeding
+
+Land alone, first.  TypeScript only, no C changes, no coordination with the
+Errors pane work.  Turns "one typo bricks the page until reload" into "error
+shown, keep working".
+
+- [[file:01-run-lifecycle.org][01-run-lifecycle.org]] — ~runAndPublish~ helper, ~setUp~ ordering, entry-point catch
+
+** Phase 1 — Make errors and crashes distinguishable
+
+02 is the linchpin: while ~main_wasm.c~ calls ~exit()~, every typo is
+indistinguishable from a segfault at the JS boundary, and 03 cannot be written
+honestly.  Touches the clox repo (~$(LOX_PROJECT)~), so it is the one stream
+that leaves this repository.
+
+- [[file:02-c-exit-status.org][02-c-exit-status.org]] — drop ~exit()~, return ~InterpretResult~, rebuild WASM
+
+** Phase 2 — Parallel build-out (after 02)
+
+Disjoint files; can be done simultaneously.
+
+- [[file:03-crash-state.org][03-crash-state.org]] — ~data-crashed~ state, crash message, Build button treatment
+- [[file:04-glue-noise.org][04-glue-noise.org]] — filter Emscripten diagnostics out of ~printErr~; build flags
+
+** Phase 3 — Non-termination
+
+- [[file:05-non-termination.org][05-non-termination.org]] — C-side step budget (4a); Web Worker (4b, deferred)
+
+* Dependency graph
+
+#+begin_example
+01-run-lifecycle ──→ 02-c-exit-status ──┬──→ 03-crash-state
+                                        └──→ 04-glue-noise
+
+05-non-termination (4a depends on 02; 4b independent, deferred)
+#+end_example
+
+01 does not strictly block 02 — they touch different languages — but doing 01
+first means 02 can be verified by rebuilding and watching the UI stay alive,
+rather than by reading the glue.
+
+* File locations
+
+| Stream | New or modified files |
+|--------+----------------------|
+| 01 | =app/src/lox-visualizer/lox-visualizer.ts= |
+| 02 | =clox/src/main_wasm.c=, =app/src/lox-visualizer/lox-core.ts=, rebuilt =lox.js= / =lox.wasm= |
+| 03 | =lox-visualizer.ts=, =static/css/lox-visualizer.css= |
+| 04 | =app/src/lox-visualizer/lox-core.ts=, clox =Makefile= (=WASM_FLAGS=) |
+| 05 | clox VM dispatch loop; later a worker harness |
+
+* Relationship to design.org
+
+~design.org~ contains a ~private runSource()~ sketch with a try/catch.  Stream 01
+supersedes it: that sketch does not restore ~data-running~ and does not publish
+the buffered execution steps, so the Build button would still stick and the
+execution panels would still come up blank.
+
+Order does not matter much, but 01 is smaller and higher-value.  Once it lands,
+adopting the Errors pane is a one-line change inside an already-correct control
+flow — ~reportRunFailure~ pushes to ~errorStore~ instead of ~consoleMessages~.
+
+* Design reference
+
+See ~crash-resilience.org~ in this directory for the failure taxonomy, the
+evidence trail (why ~exit(70)~ throws), and the full rationale for each stream.

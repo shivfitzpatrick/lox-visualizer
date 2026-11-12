@@ -1,0 +1,91 @@
+#+title: Pane Wrapper DOM
+#+date: 2026-06-19
+#+phase: 2 (after 01)
+
+Wrap each pane shell in a ~.lox-pane~ container and insert a ~.lox-panel-label~
+element above the shell.  This is the only mount-path change — both visualizers
+inherit labels automatically.
+
+* Background
+
+Today ~buildLayoutDOM~ appends ~.lox-panel~ shells directly to
+~.lox-visualizer-row~:
+
+#+begin_example
+.lox-visualizer-row
+  .lox-panel.lox-panel--editor
+  .lox-panel.lox-panel--lexer
+#+end_example
+
+The label must sit *outside* and *above* the bordered chrome.  A wrapper keeps
+the panel shell unchanged so existing panel code and the ~containers~ map API
+stay stable.
+
+Depends on: ~panelLabel~ from [[file:01-label-metadata.org][01-label-metadata.org]].
+
+* Tasks
+
+** DONE Introduce ~.lox-pane~ wrapper in ~buildLayoutDOM~
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/mount.ts
+   :END:
+
+For each ~kind~ in a layout row:
+
+1. Create ~paneEl~ with class ~lox-pane~.
+2. Create ~labelEl~ with class ~lox-panel-label~, ~textContent =
+   panelLabel(kind)~.
+3. Create ~shell~ as today (~lox-panel lox-panel--{kind}~, ~panelShellId~).
+4. ~paneEl.append(labelEl, shell)~; ~rowEl.append(paneEl)~.
+5. ~containers.set(kind, shell)~ — *not* the wrapper.
+
+Export a constant for the wrapper class (alongside existing layout constants):
+
+#+begin_src typescript
+export const LOX_PANE_CLASS = 'lox-pane';
+export const LOX_PANEL_LABEL_CLASS = 'lox-panel-label';
+#+end_src
+
+Place these in ~layout.ts~ next to ~LOX_PANEL_CLASS~ so CSS and tests can
+import one module.
+
+** DONE Update ~mount.test.ts~ structure assertions
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/mount.test.ts
+   :END:
+
+Adjust existing ~buildLayoutDOM~ tests:
+
+- Row children are ~.lox-pane~, not ~.lox-panel~.
+- Each ~.lox-pane~ contains exactly one ~.lox-panel-label~ and one ~.lox-panel~.
+- ~containers.get('lexer')~ is still the inner shell (class/id unchanged).
+
+Defer label *text* assertions to 04; here only check element presence and
+nesting.
+
+* DOM contract
+
+#+begin_example
+<div class="lox-visualizer-row">
+  <div class="lox-pane">
+    <div class="lox-panel-label">Source</div>
+    <div class="lox-panel lox-panel--editor" id="lox-editor">…</div>
+  </div>
+  <div class="lox-pane">
+    <div class="lox-panel-label">Lexer</div>
+    <div class="lox-panel lox-panel--lexer" id="lox-lexer">…</div>
+  </div>
+</div>
+#+end_example
+
+* Non-goals
+
+- Do *not* move label creation into individual panel classes — one mount
+  function owns all labels.
+- Do *not* change ~PanelContext~ or registry factories.
+
+* Acceptance
+
+- ~DEFAULT_LAYOUT~ still produces 5 rows, 7 pane shells, correct shell ids.
+- ~containers~ map values are the ~.lox-panel~ elements panels already expect.
+- No panel source files modified.

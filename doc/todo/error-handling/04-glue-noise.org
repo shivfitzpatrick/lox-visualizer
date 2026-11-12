@@ -1,0 +1,81 @@
+#+title: Keep Emscripten Internals Out of the Panels
+#+date: 2026-08-03
+#+phase: 2 (after 02, parallel with 03)
+#+TODO: TODO NEXT IN-PROGRESS WAITING | DONE CANCELLED
+
+The glue's ~err()~ is bound to our ~printErr~, so Emscripten's own diagnostics
+are rendered to readers as error lines next to clox's messages.
+
+* Background
+
+~lox.js~ line ~1277~: ~if (Module['printErr']) err = Module['printErr']~.  Every
+internal warning therefore lands in ~consoleStore~ via the ~stderr~ event.  A
+reader who typed ~var x = ;~ currently sees clox's message followed by:
+
+#+begin_example
+  program exited (with status: 65), but keepRuntimeAlive() is set (counter=0)
+  due to an async operation, so halting execution but not exiting the runtime
+  or preventing further async execution (you can use emscripten_force_exit, if
+  you want to force a true shutdown)
+#+end_example
+
+Stream 02 removes the trigger for that particular line, but the class of
+problem remains (~checkUnflushedContent~, ~abort~ text, future glue warnings).
+
+* Tasks
+
+** TODO Filter glue diagnostics in ~printErr~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-core.ts
+   :END:
+
+Denylist by prefix/substring before dispatching the ~stderr~ event; send matches
+to ~console.error~ only.
+
+#+begin_src typescript
+  const GLUE_NOISE = [
+      'program exited (with status:',
+      'stdio streams had content in them that was not flushed',
+      '(this may also be due to not including full filesystem support',
+      'Aborted(',   // surfaced by stream 03's crash message instead
+  ];
+#+end_src
+
+These strings are stable across Emscripten versions.  Keep the list next to a
+comment explaining *why* each is suppressed, so a future reader does not
+"restore" them.
+
+Apply the same treatment to the Python visualizer's error path if Pyodide turns
+out to have an equivalent (check before assuming it does).
+
+** TODO Build the shipped artifact without ASSERTIONS
+   :PROPERTIES:
+   :files:    clox/Makefile (WASM_FLAGS)
+   :END:
+
+The current ~WASM_FLAGS~ set no optimisation or assertion level, so the shipped
+module is an ~-O0~ ASSERTIONS build — hence the ~assert()~ calls throughout the
+glue and the ~checkUnflushedContent~ machinery.  Adding ~-O2 -sASSERTIONS=0~
+shrinks the artifact and removes this class of noise at the source.
+
+Keep a debug build available for local work — a second target (~wasm-debug~)
+rather than a flag flip, so the two do not get confused.
+
+Measure the size difference and note it here; the module is served on a blog
+post, so it is worth knowing.
+
+** TODO Check what else reaches the console panel
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-core.ts
+   :END:
+
+While in ~printErr~: the ~print~ handler parses any line starting with ~{~ as a
+JSON event *and* forwards it to ~stdout~.  Confirm that is intentional — a
+program printing a JSON-looking string (~print "{}";~) currently gets parsed as
+an event and can throw inside the handler.  If so, that is a small separate bug;
+file it rather than fixing it here.
+
+* Done when
+
+A reader only ever sees output their program produced, plus errors written in
+terms of their program.

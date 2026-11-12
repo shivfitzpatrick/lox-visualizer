@@ -1,0 +1,319 @@
+#+title: Lox VM Execution Visualization
+#+date: 2026-06-18
+
+Design for visualizing stack contents as a Lox program runs, with step-by-step
+playback and a bytecode panel arrow that tracks the currently executing
+instruction.
+
+* Overview
+
+After the compiler visualization (lex → parse → compile), we add a second mode:
+=Run=. Running the VM emits =vm_step= events — one per instruction dispatch —
+each carrying the instruction that was just executed and the full VM stack at
+that moment. The frontend records these into a =VmExecution= array and makes
+them available for playback.
+
+During playback:
+- A stack panel shows the Lox stack state (slots grouped by call frame).
+- The bytecode panel shows a ► marker on the instruction that was just
+  dispatched.
+- Playback controls let the user step forward/backward or scrub freely.
+
+* C-Side Changes
+
+** New event type: =vm_step=
+
+Emit one JSON line on stdout immediately /after/ each instruction dispatch, while
+=vm.ip= still points to the next instruction. The event carries:
+- The chunk and offset of the instruction that just ran.
+- A snapshot of the entire value stack.
+- A snapshot of all live call frames (for frame-boundary rendering).
+
+#+begin_src c
+// Emit after each DISPATCH() in the run() loop, before continuing.
+// Pseudo-code:
+static void emitVmStep(VM* vm, ObjFunction* fn, int instrOffset) {
+    printf("{\"msg_type\":\"vm_step\","
+           "\"chunk\":\"%s\","
+           "\"offset\":%d,"
+           "\"stack\":[",
+           fn->name ? fn->name->chars : "script",
+           instrOffset);
+
+    for (Value* slot = vm->stack; slot < vm->stackTop; slot++) {
+        if (slot != vm->stack) printf(",");
+        printValueJson(*slot);
+    }
+
+    printf("],\"frames\":[");
+    for (int i = 0; i < vm->frameCount; i++) {
+        CallFrame* f = &vm->frames[i];
+        int base = (int)(f->slots - vm->stack);
+        const char* name = f->closure->function->name
+            ? f->closure->function->name->chars : "script";
+        if (i > 0) printf(",");
+        printf("{\"fn\":\"%s\",\"base\":%d}", name, base);
+    }
+    printf("]}\n");
+}
+#+end_src
+
+** Value serialization
+
+Lox values need to be rendered as JSON with enough information for the UI to
+show a meaningful label and type badge.
+
+| Lox value type     | JSON shape                                          |
+|--------------------+-----------------------------------------------------|
+| number             | ={ "t": "num", "v": 3.14 }=                         |
+| bool               | ={ "t": "bool", "v": true }=                        |
+| nil                | ={ "t": "nil" }=                                    |
+| string             | ={ "t": "str", "v": "hello" }=                      |
+| closure/function   | ={ "t": "fn", "name": "f", "arity": 2 }=            |
+| native function    | ={ "t": "native", "name": "clock" }=                |
+| class              | ={ "t": "class", "name": "Foo" }=                   |
+| instance           | ={ "t": "inst", "class": "Foo" }=                   |
+| bound method       | ={ "t": "method", "name": "bar" }=                  |
+| upvalue            | ={ "t": "upval" }=                                  |
+
+Use short =t= keys to keep stdout volume low; the stack can be deep.
+
+** Performance note
+
+For large programs the event stream can be very long. For now, collect
+everything; add a configurable step limit later if needed.
+
+* TypeScript Types
+
+Add to =app/src/compiler-viz/types.ts= (or a new
+=app/src/compiler-viz/execution.ts= if preferred):
+
+#+begin_src typescript
+export type StackValueType =
+    | 'num' | 'bool' | 'nil' | 'str'
+    | 'fn' | 'native' | 'class' | 'inst' | 'method' | 'upval';
+
+export interface StackValue {
+    t: StackValueType;
+    v?: number | boolean | string;   // number/bool/string/fn-arity payload
+    name?: string;                   // fn, native, class, method name
+    class?: string;                  // instance's class name
+    arity?: number;                  // fn arity
+}
+
+export interface CallFrameInfo {
+    fn: string;   // function name, "script" for top-level
+    base: number; // index into stack array where this frame's slots start
+}
+
+export interface VmStep {
+    msg_type: 'vm_step';
+    chunk: string;
+    offset: number;
+    stack: StackValue[];
+    frames: CallFrameInfo[];
+}
+#+end_src
+
+Add =VmStep= to the =LoxEventHandlers= map in =lox-core.ts=:
+
+#+begin_src typescript
+export interface LoxEventHandlers {
+    // ... existing ...
+    vm_step: (event: VmStep) => void;
+}
+#+end_src
+
+And register the new dispatch channel:
+
+#+begin_src typescript
+const raw = d3.dispatch(
+    'stdout', 'stderr', 'lexer', 'parser', 'compiler', 'print', 'session',
+    'vm_step',   // new
+);
+#+end_src
+
+* Store Additions
+
+Add an execution store alongside the existing =VizDataStore= and =ConsoleStore=:
+
+#+begin_src typescript
+export interface ExecutionState {
+    steps: VmStep[];          // recorded execution trace
+    currentStep: number | null; // null = not in playback mode
+    playing: boolean;           // auto-advance is running
+}
+
+export type ExecutionStore = Store<ExecutionState>;
+#+end_src
+
+The store starts as ={ steps: [], currentStep: null, playing: false }=.
+
+When the user clicks =Run=:
+1. Clear =steps=[].
+2. Subscribe to =vm_step= events, pushing each into =steps=.
+3. Run =runSource(code)=.
+4. On completion, set =currentStep= to 0 to enter playback mode.
+
+* Playback Data Model
+
+=steps= is the single source of truth. The current display state is always
+=steps[currentStep]=. No derived arrays or secondary buffers.
+
+Transitions:
+- =stepForward()=: =currentStep = Math.min(currentStep + 1, steps.length - 1)=
+- =stepBackward()=: =currentStep = Math.max(currentStep - 1, 0)=
+- =scrubTo(n)=: =currentStep = n=
+- =play()=: sets =playing = true=, schedules =stepForward= on an interval (e.g. 200 ms)
+- =pause()=: clears the interval, sets =playing = false=
+
+Auto-play pauses automatically when =currentStep= reaches =steps.length - 1=.
+
+* Stack Panel
+
+A new panel — =StackPanel= — extending =VisualizationPanel= (or using the same
+=Component= base as the others today).
+
+** Layout
+
+Slots render top of stack at the top of the panel (most recently pushed slot
+first), since that matches how readers typically think about stacks. Use a
+vertical list. Each slot row shows:
+
+#+begin_example
+  [frame label]      ← shown once per frame boundary, not per slot
+  ┌──────────────────────────┐
+  │  #5  │ num  │ 3.14       │
+  │  #4  │ str  │ "hello"    │
+  │──────────────────────────│  ← frame boundary
+  │  #3  │ fn   │ myFn/2     │
+  │  #2  │ bool │ true       │
+  │  #1  │ nil  │            │
+  │  #0  │ num  │ 42         │
+  └──────────────────────────┘
+#+end_example
+
+Slot index (#N) counts from the bottom of the stack (slot 0 = first pushed).
+Frame boundaries are drawn as horizontal separators with the frame's function
+name label floating on the right.
+
+** Value display
+
+| =t=       | display                          |
+|-----------+----------------------------------|
+| =num=     | the number, up to 6 sig digits   |
+| =bool=    | =true= or =false=                |
+| =nil=     | =(nil)=                          |
+| =str=     | ="..."= truncated to 20 chars    |
+| =fn=      | =fn/arity= e.g. =myFn/2=        |
+| =native=  | =<native>=                       |
+| =class=   | class name                       |
+| =inst=    | =ClassName {}=                   |
+| =method=  | =obj.name=                       |
+| =upval=   | =<upval>=                        |
+
+** Empty state
+
+When =currentStep= is =null=, the panel shows a placeholder:
+"Run a program to see the execution trace."
+
+** Connector integration
+
+The stack panel does not participate in the connector system for now. It is
+display-only; selection does not propagate to the bytecode or AST panels.
+This can be added later.
+
+* Bytecode Panel Changes
+
+The bytecode panel currently has click handlers disabled. The executing-arrow
+is a separate, non-interactive decoration that co-exists with the eventual
+return of click-to-select.
+
+** Execution arrow
+
+Add an =executingOffset: { chunk: string; offset: number } | null= prop to the
+bytecode panel. When set, the corresponding =<tr>= gets a class =bc-executing=.
+
+CSS:
+
+#+begin_src css
+tr.bc-executing td:first-child::before {
+    content: '►';
+    margin-right: 4px;
+    color: var(--color-accent);
+}
+#+end_src
+
+The bytecode panel subscribes to =ExecutionStore.currentStep=. On change it
+resolves =steps[currentStep]= → =chunk= + =offset= and calls a method like
+=setExecuting(chunk, offset)= which does the d3 class update.
+
+** Open =<details>= for executing chunk
+
+When the execution arrow moves to an instruction in a currently-collapsed
+=<details>= block, programmatically open it (and scroll the row into view).
+
+* Playback Controls
+
+A small controls bar rendered below or above the stack panel. Needs:
+
+- ◄◄ (go to start)
+- ◄  (step back)
+- ►/⏸ (play / pause toggle)
+- ►  (step forward)
+- ►►  (go to end)
+- A scrubber =<input type="range">= bound to =currentStep= / =steps.length=
+- A step counter: "Step N / M"
+
+The controls bar is its own =Component= (or a plain function that returns a DOM
+element), owned by the orchestrator, not by the stack panel. It reads and writes
+=ExecutionStore=.
+
+* Implementation Order
+
+** Phase 1 — C side
+
+1. Implement =printValueJson()= for all value types.
+2. Add =emitVmStep()= call after each dispatch in the VM =run()= loop.
+3. Verify with a simple Lox program that events appear on stdout and are valid
+   JSON.
+
+** Phase 2 — TypeScript types and event wiring
+
+1. Add =VmStep=, =StackValue=, =CallFrameInfo= to =compiler-viz/types.ts= (or
+   new =execution.ts=).
+2. Add =vm_step= to =LoxEventHandlers= and the d3 dispatch in =lox-core.ts=.
+3. Add =ExecutionStore= and =ExecutionState= to the store module.
+4. Wire the event handler: on =vm_step=, push to =ExecutionStore.steps=.
+
+** Phase 3 — Stack panel
+
+1. Create =app/src/compiler-viz/panels/stack-panel.ts=.
+2. Implement slot rendering with frame boundary separators.
+3. Subscribe to =ExecutionStore=; re-render on =currentStep= change.
+4. Mount in the orchestrator, initially hidden until =steps.length > 0=.
+
+** Phase 4 — Bytecode execution arrow
+
+1. Add =setExecuting(chunk, offset)= to the bytecode panel (or expose via the
+   existing =BytecodePanel= interface).
+2. Subscribe the orchestrator (or a thin coordinator) to =ExecutionStore= and
+   call =setExecuting= on each step change.
+3. Ensure the correct =<details>= block is opened and the row is scrolled into
+   view.
+
+** Phase 5 — Playback controls
+
+1. Create =app/src/compiler-viz/panels/playback-controls.ts=.
+2. Wire ◄◄/◄/►⏸/►/►► and the scrubber to =ExecutionStore=.
+3. Implement auto-play with =setInterval= / =clearInterval=.
+4. Mount in the orchestrator.
+
+** Phase 6 — Polish
+
+- Tune auto-play speed; consider variable speed (0.5×, 1×, 2×).
+- Add keyboard shortcuts (space = play/pause, ← / → = step).
+- Consider a step-count cap with a warning for very long programs.
+- Connector from executing bytecode row to highlighted AST node (reusing the
+  existing =bc-ast= connector machinery once the instruction→node mapping is
+  fixed).

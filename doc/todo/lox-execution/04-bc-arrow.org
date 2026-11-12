@@ -1,0 +1,149 @@
+#+title: Bytecode Panel — Execution Arrow
+#+date: 2026-06-18
+#+phase: 2 (after 02 — parallel with 03, 05)
+
+Add a ► marker to the bytecode panel that tracks the currently executing
+instruction during playback.  This is a separate visual state from the
+user's click-selection (currently disabled); the two can co-exist on the same
+row.
+
+* Background
+
+The bytecode panel renders a =<table>= per chunk via =drawBytecode= in
+=app/src/lox-visualizer/bytecode.ts=.  Each =<tr>= already carries a
+=data-src-offset= attribute.  The click handler is currently commented out.
+
+The execution arrow only shows during playback (=ExecutionStore.currentStep !== null=).
+It does not interact with the selection store — it is purely driven by
+=ExecutionStore=.
+
+The relevant panel class is at:
+- =app/src/compiler-viz/panels/bytecode-panel.ts= (re-exports from the same path)
+- Check whether =BytecodePanel= lives in =app/src/compiler-viz/panels/bytecode-panel.ts=
+  or =app/src/lox-visualizer/panels/bytecode-panel.ts= — the former is the
+  canonical location per the arch-refactor.
+
+Depends on: =ExecutionStore= and =VmStep= types from 02.
+
+* Tasks
+
+** DONE Add =data-offset= and =data-chunk= to bytecode rows
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/bytecode.ts
+   :END:
+
+Currently rows only carry =data-src-offset= (the source character offset).  For
+the execution arrow we need to look up by *bytecode offset within a named chunk*:
+
+#+begin_src typescript
+rows.attr('data-offset', d => String(d.offset))
+    .attr('data-chunk', d => d.chunk);   // ← add
+#+end_src
+
+With both attributes set, a step event =({ chunk, offset })= maps to exactly one row:
+
+#+begin_src typescript
+container.querySelector<HTMLElement>(
+    `tr[data-chunk="${chunk}"][data-offset="${offset}"]`
+)
+#+end_src
+
+(Note: =data-src-offset= is a source character offset; =data-offset= is the
+bytecode offset.  They are different.  Keep both.)
+
+** DONE Add =setExecuting= to =BytecodePanel=
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/panels/bytecode-panel.ts
+   :END:
+
+Add a public method (or expose via a handle) to set the executing row:
+
+#+begin_src typescript
+private executingRow: HTMLElement | null = null;
+
+setExecuting(chunk: string | null, offset: number | null) {
+    this.executingRow?.classList.remove('bc-executing');
+    this.executingRow = null;
+
+    if (chunk === null || offset === null) return;
+
+    const row = this.container.querySelector<HTMLElement>(
+        `tr[data-chunk="${chunk}"][data-offset="${offset}"]`
+    );
+    if (!row) return;
+
+    row.classList.add('bc-executing');
+    this.executingRow = row;
+
+    // Auto-open the <details> block if collapsed, then scroll into view.
+    const details = row.closest<HTMLDetailsElement>('details');
+    if (details && !details.open) details.open = true;
+    row.scrollIntoView({ block: 'nearest' });
+}
+#+end_src
+
+Call =setExecuting(null, null)= in =tearDown= and after each =onDataChange=
+(new bytecode renders, old rows are gone).
+
+** DONE Subscribe =BytecodePanel= to =ExecutionStore=
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/panels/bytecode-panel.ts
+   :END:
+
+Pass =ExecutionStore= to =BytecodePanel= (via constructor or a setter) and
+subscribe in =setUp=:
+
+#+begin_src typescript
+this.executionStore.subscribe(state => {
+    if (state.currentStep === null) {
+        this.setExecuting(null, null);
+        return;
+    }
+    const step = state.steps[state.currentStep];
+    this.setExecuting(step.chunk, step.offset);
+});
+#+end_src
+
+Store the unsubscribe function and call it in =tearDown=.
+
+** DONE Add CSS for =bc-executing=
+   :PROPERTIES:
+   :files:    assets/css/ (wherever bytecode styles currently live)
+   :END:
+
+Find the existing =bc-selected=, =bc-highlight= etc. rules and add alongside:
+
+#+begin_src css
+tr.bc-executing td:first-child::before {
+    content: '►';
+    margin-right: 4px;
+    color: var(--color-accent, #f90);
+}
+
+/* When executing and selected overlap, show both. */
+tr.bc-executing.bc-selected td:first-child::before {
+    content: '►';
+}
+#+end_src
+
+The arrow appears in the offset column's left gutter via =::before=, so it
+doesn't shift the row layout.
+
+* Open questions
+
+- *=ExecutionStore= injection*: the cleanest path is to pass it in the
+  constructor, matching how =selectionStore= will be passed after the arch-refactor.
+  If the orchestrator creates =BytecodePanel= before instantiating =ExecutionStore=,
+  use a =setExecutionStore(store)= setter instead.
+- *Scrolling behavior*: =scrollIntoView({ block: 'nearest' })= only scrolls if
+  the row is not already visible, which is the right default.  If the bytecode
+  table sits inside a fixed-height scrollable container, test that the scroll
+  target is the container, not the page.
+- *Row disappears on re-render*: =onDataChange= calls =drawBytecode= which removes
+  all =<details>= and rebuilds.  =this.executingRow= will point at a detached DOM
+  element.  =setExecuting= is called with =null= in =onDataChange= to clear it
+  before the re-render, so this is safe — but the order matters: clear first,
+  then re-render, then the store subscription fires again with the same step.
+  If the subscription fires before =onDataChange= completes, the re-find may
+  fail.  Safest: call =setExecuting= explicitly at the end of =onDataChange=
+  using the current store state.

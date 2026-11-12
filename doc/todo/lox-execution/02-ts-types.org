@@ -1,0 +1,166 @@
+#+title: TypeScript — Types, Store, Event Wiring
+#+date: 2026-06-18
+#+phase: 1 (parallel with 01)
+
+Define the TypeScript types for execution events, add =ExecutionStore=, and wire
+the new =vm_step= event through the d3 dispatch in =lox-core.ts=.  Everything in
+phases 2–3 (03, 04, 05) depends on these foundations.
+
+* Background
+
+The existing event pipeline is:
+
+#+begin_example
+clox stdout → JSON.parse → d3.dispatch (lox-core.ts) → event handlers
+#+end_example
+
+The =vm_step= event slots into the same pipeline.  The event shape is specified
+in ~design.org~; this task codifies it as TypeScript interfaces and wires up the
+plumbing so downstream consumers can subscribe to =vm_step= events and read
+execution state from a store.
+
+* Tasks
+
+** DONE Create =app/src/compiler-viz/execution.ts=
+   :PROPERTIES:
+   :files:    app/src/compiler-viz/execution.ts (new)
+   :END:
+
+Define all execution-related types in a new file.  Keep them separate from
+=compiler-viz/types.ts= to avoid growing that file further:
+
+#+begin_src typescript
+export type StackValueType =
+    | 'num' | 'bool' | 'nil' | 'str'
+    | 'fn' | 'native' | 'class' | 'inst' | 'method' | 'upval';
+
+export interface StackValue {
+    t: StackValueType;
+    v?: number | boolean | string;
+    name?: string;   // fn, native, class, method
+    class?: string;  // instance's class name
+    arity?: number;  // fn arity
+}
+
+export interface CallFrameInfo {
+    fn: string;    // function name; "script" for top-level
+    base: number;  // index of this frame's first slot in the stack array
+}
+
+export interface VmStep {
+    msg_type: 'vm_step';
+    chunk: string;
+    offset: number;
+    stack: StackValue[];
+    frames: CallFrameInfo[];
+}
+
+export interface ExecutionState {
+    steps: VmStep[];
+    currentStep: number | null;
+    playing: boolean;
+}
+#+end_src
+
+Also export a factory for the store type alias (import =Store= from =@/lib/store=):
+
+#+begin_src typescript
+import type { Store } from '@/lib/store';
+export type ExecutionStore = Store<ExecutionState>;
+export const INITIAL_EXECUTION_STATE: ExecutionState = {
+    steps: [],
+    currentStep: null,
+    playing: false,
+};
+#+end_src
+
+** DONE Add =vm_step= to =LoxEventHandlers= and the d3 dispatch
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-core.ts
+   :END:
+
+Import =VmStep= from =@/compiler-viz/execution= and extend the handler map:
+
+#+begin_src typescript
+import type { VmStep } from '@/compiler-viz/execution';
+
+export interface LoxEventHandlers {
+    stdout: (text: string) => void;
+    stderr: (text: string) => void;
+    lexer: (event: LexerEvent) => void;
+    parser: (event: ParserEvent) => void;
+    compiler: (event: CompilerEvent) => void;
+    print: (event: PrintEvent) => void;
+    session: (event: unknown) => void;
+    vm_step: (event: VmStep) => void;   // ← new
+}
+#+end_src
+
+Add ='vm_step'= to the =d3.dispatch= call (around line 47):
+
+#+begin_src typescript
+const raw = d3.dispatch(
+    'stdout', 'stderr', 'lexer', 'parser', 'compiler', 'print', 'session',
+    'vm_step',
+);
+#+end_src
+
+The existing JSON routing in =print()= (around line 73) already calls
+=raw.call(event.msg_type, ...)= — no changes needed there; =vm_step= events will
+be routed automatically once the dispatch channel exists.
+
+** DONE Create =ExecutionStore= and expose it from the orchestrator
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer-demo.ts (or the refactored orchestrator)
+   :END:
+
+In the orchestrator (=LoxVisualizer= or its successor), instantiate the store:
+
+#+begin_src typescript
+import { createStore } from '@/lib/store';
+import { INITIAL_EXECUTION_STATE } from '@/compiler-viz/execution';
+import type { ExecutionStore } from '@/compiler-viz/execution';
+
+// in setUp() or the constructor:
+this.executionStore: ExecutionStore = createStore(INITIAL_EXECUTION_STATE);
+#+end_src
+
+Subscribe to the =vm_step= event and push steps into the store.  Do this inside
+the code-run flow (after calling =runSource=), not in the general =setUp=:
+
+#+begin_src typescript
+// Before calling runSource:
+this.executionStore.set(INITIAL_EXECUTION_STATE);  // clear previous run
+
+// Wire the live collector (add this once during setUp, not per-run):
+events.on('vm_step', (event: VmStep) => {
+    const current = this.executionStore.get();
+    this.executionStore.set({ steps: [...current.steps, event] });
+});
+#+end_src
+
+After =runSource= returns (it is synchronous), set =currentStep= to =0= if steps
+were collected:
+
+#+begin_src typescript
+runSource(code);
+const { steps } = this.executionStore.get();
+if (steps.length > 0) {
+    this.executionStore.set({ currentStep: 0 });
+}
+#+end_src
+
+Note: the spread-copy in the event handler is safe for the expected step counts
+but can be replaced with a mutable approach if profiling shows it matters.  See
+06-polish for a possible array-mutation optimization.
+
+* Open questions
+
+- *Store location*: the orchestrator (=lox-visualizer-demo.ts= today) creates and
+  owns the store.  After the arch-refactor lands (arch-refactor/08), the
+  orchestrator will be =lox-visualizer.ts=.  This task should target whichever
+  file is current; leave a TODO comment if the refactor is in flight.
+- *Spread vs. mutable push*: if step counts exceed ~5 000, spreading on every
+  push will be slow.  A simple fix: replace the store pattern with a module-level
+  =steps= array that the store only points at.  Capture this as a note for
+  06-polish; don't over-engineer now.

@@ -1,0 +1,51 @@
+#+title: Orchestrator Quick Wins
+#+date: 2026-06-19
+#+phase: 0
+
+Small ~python-visualizer.ts~ changes that mirror recent Lox orchestrator
+improvements.  No emitter or panel changes.
+
+* Tasks
+
+** TODO Add bc-exec connector line
+   :PROPERTIES:
+   :files: app/src/python-visualizer/python-visualizer.ts
+   :END:
+
+After ~declareConnectors(connectors, layout, colors.highlight)~, add:
+
+#+begin_src typescript
+if (layoutIncludes(layout, 'bytecode') && layoutIncludes(layout, 'ast')) {
+    connectors.addLine('bc-exec', 'ast-exec', '#f90');
+}
+#+end_src
+
+Import ~layoutIncludes~ from ~@/compiler-viz/layout~ (already imported in Lox).
+
+** TODO Store executionStore on PythonVisualizer
+   :PROPERTIES:
+   :files: app/src/python-visualizer/python-visualizer.ts
+   :END:
+
+~fromPage~ creates ~executionStore~ but the constructor discards it.  Add
+~private executionStore: ExecutionStore~ field; pass through constructor;
+assign in ~fromPage~.
+
+** TODO Reset executionStore on run
+   :PROPERTIES:
+   :files: app/src/python-visualizer/python-visualizer.ts
+   :END:
+
+At the start of ~run()~:
+
+#+begin_src typescript
+this.executionStore.set({ steps: [], prints: [], currentStep: null, playing: false });
+#+end_src
+
+Import ~ExecutionStore~ type from ~@/compiler-viz/execution~.
+
+* Acceptance
+
+- Python visualizer compiles without type errors.
+- No visible behavior change until Phase 2 populates steps.
+- bc-exec connector registered when layout includes bytecode + AST.

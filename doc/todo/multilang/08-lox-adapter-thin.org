@@ -1,0 +1,119 @@
+#+title: Phase 2e — Thin Lox Orchestrator + Shared Registry
+#+date: 2026-06-18
+#+phase: 2e (after 07)
+
+Wire the Lox orchestrator to the new ~compiler-viz/~ paths.  Add
+~createDefaultPanelRegistry~ to ~compiler-viz/layout.ts~ so a Python
+orchestrator can use the same panel classes.  Optional: remove re-export stubs
+that are no longer needed.
+
+* Background
+
+After streams 04–07, ~lox-visualizer.ts~ still imports panels and layout
+utilities from old paths (via stubs, which work — but pointing directly at
+~compiler-viz/~ is cleaner).  The one remaining Lox-specific piece in the
+shared layer is ~createPanelRegistry~ in ~layout.ts~; this stream extracts its
+generic form and re-homes the Lox-specific wiring to the orchestrator.
+
+* Tasks
+
+** DONE Add ~createDefaultPanelRegistry~ to ~compiler-viz/layout.ts~
+   :PROPERTIES:
+   :files: app/src/compiler-viz/layout.ts
+   :END:
+
+Add a shared factory that accepts a ~TokenCategoryMap~ and builds the standard
+four-panel registry:
+
+#+begin_src typescript
+import type { TokenCategoryMap } from '@/lox-visualizer/token-map';
+import { LexerPanel } from '@/compiler-viz/panels/lexer-panel';
+import { AstPanel } from '@/compiler-viz/panels/ast-panel';
+import { BytecodePanel } from '@/compiler-viz/panels/bytecode-panel';
+import { ConsolePanel } from '@/compiler-viz/panels/console-panel';
+import { EditorSlot } from '@/compiler-viz/slots/editor-slot';
+
+export function createDefaultPanelRegistry(
+    ctx: PanelContext,
+    tokenMap: TokenCategoryMap,
+): PanelRegistry { /* mirror existing createPanelRegistry body */ }
+#+end_src
+
+~TokenCategoryMap~ type import comes from ~@/lox-visualizer/token-map~ for now
+(the type is generic even though the import path looks Lox-ish).
+
+Note: ~createPanelRegistry~ in ~lox-visualizer/layout.ts~ (which is now a
+stub) can be removed here or left as a deprecated re-export pointing to
+~createDefaultPanelRegistry~.
+
+** DONE Update ~lox-visualizer.ts~ to import from ~compiler-viz/~
+   :PROPERTIES:
+   :files: app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+Replace stub-path imports with direct ~@/compiler-viz/*~ imports:
+
+- ~createDefaultPanelRegistry~ from ~@/compiler-viz/layout~
+- ~mountVisualizer~, ~findEntryScript~, ~mountOptionsFromScript~ from
+  ~@/compiler-viz/mount~ (or ~@/compiler-viz/layout~)
+- ~VizData~, ~VizDataStore~, ~VizSelection~, ~ConsoleStore~ from
+  ~@/compiler-viz/types~
+- ~ConnectorLayer~ from ~@/compiler-viz/connector-layer~
+- ~VisualizationPanel~ from ~@/compiler-viz/visualization-panel~
+
+Pass ~LOX_TOKEN_CATEGORY_MAP~ to ~createDefaultPanelRegistry~:
+
+#+begin_src typescript
+import { LOX_TOKEN_CATEGORY_MAP } from '@/lox-visualizer/token-map';
+// …
+const registry = createDefaultPanelRegistry(ctx, LOX_TOKEN_CATEGORY_MAP);
+#+end_src
+
+** DONE Move and update shared tests
+   :PROPERTIES:
+   :files: app/src/lox-visualizer/layout.test.ts,
+           app/src/lox-visualizer/mount.test.ts,
+           app/src/lox-visualizer/connector-layer.test.ts,
+           app/src/lox-visualizer/slots/slots.test.ts
+   :END:
+
+Move test files alongside their implementation to ~compiler-viz/~.  Update
+import paths.  Tests that already use stubs and pass without changes can be
+left in place, but co-location is preferred.
+
+- ~layout.test.ts~ → ~compiler-viz/layout.test.ts~
+- ~mount.test.ts~ → ~compiler-viz/mount.test.ts~
+- ~connector-layer.test.ts~ → ~compiler-viz/connector-layer.test.ts~
+- ~slots/slots.test.ts~ → ~compiler-viz/slots/slots.test.ts~
+
+** DONE Remove stale re-export stubs (optional cleanup)
+   :PROPERTIES:
+   :files: app/src/lox-visualizer/*.ts stubs
+   :END:
+
+Once ~lox-visualizer.ts~ imports directly from ~compiler-viz/~, the stubs in
+~lox-visualizer/~ are only needed for external callers (none in the current
+codebase).  Remove each stub if ~grep -r "lox-visualizer/<stubname>" app/src/~
+returns no results other than the stub itself.
+
+Do *not* remove stubs that are still imported by other files (check carefully).
+
+* Acceptance
+
+- ~createDefaultPanelRegistry(ctx, tokenMap)~ exists in ~compiler-viz/layout.ts~.
+- ~lox-visualizer.ts~ imports from ~@/compiler-viz/*~, not from
+  ~@/lox-visualizer/*~ stubs (except for Lox-specific things: ~lox-core~,
+  ~lox-data~, ~events~, ~state/~, ~token-map~).
+- ~grep 'CompilerEvent\|LoxData\|VisualizerSelection' app/src/compiler-viz/~
+  → no matches.
+- cloxvis post: layout, connectors, selection, Run all work — no regression.
+- Vitest green.
+
+* Notes
+
+After this stream, Phase 3 (Python adapter skeleton) can begin.  A Python
+orchestrator will:
+1. Import ~createDefaultPanelRegistry~ from ~@/compiler-viz/layout~.
+2. Pass its own ~PYTHON_TOKEN_CATEGORY_MAP~.
+3. Provide its own ~deriveVizData~ in ~python-visualizer/py-data.ts~.
+4. Everything else is shared.

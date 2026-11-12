@@ -1,0 +1,240 @@
+#+title: Orchestrator + Cleanup
+#+date: 2026-06-18
+#+phase: 3 (last — depends on 01–07)
+
+Rewrite ~lox-visualizer-demo.ts~ into ~lox-visualizer.ts~ as a thin
+orchestrator, wire the store / connector layer / panels together, then remove
+the old code paths and update every reference (build config, post script tag,
+tests).
+
+* Orchestrator's four responsibilities
+
+Per ~doc/lox-visualizer-architecture.org~ → "The orchestrator":
+
+1. Create the WASM instance and run source.
+2. Accumulate WASM events into ~LoxState~ and, when aggregation completes,
+   derive once and publish to the *data store* (~dataStore.set({ data })~).
+3. Create the two stores (data + selection), the connector layer, and panels.
+4. Handle the editor and re-run.
+
+Everything else (selection state, cross-panel highlight, connector drawing) now
+lives in panels + the connector layer.  Note: the orchestrator *publishes to
+stores*; it does not call ~panel.onDataChange()~ directly — panels subscribe in
+their base ~setUp~ (see 04).  The raw WASM event stream stays on ~d3.dispatch~
+in ~lox-core~; the orchestrator is the bridge from that stream into the stores
+(see ~00-overview.org~ → "State management").
+
+* Tasks
+
+** DONE Settle the lifecycle contract (gate)
+   :PROPERTIES:
+   :files:    app/src/lib/component.ts
+   :END:
+
+Implement the decision from ~04-panel-base.org~ (recommended: ~Component~
+constructor no longer calls ~setUp()~; lifecycle is explicit).  This is a
+prerequisite for putting panels in ~children~.  Confirm no other ~Component~
+subclass depends on constructor-time ~setUp~ (only the visualizer uses
+~Component~ today).
+
+** DONE Extract the shared theme
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/theme.ts (new)
+   :END:
+
+Move ~baseColors~, ~colors~, ~weight~ (demo 22–38) into ~theme.ts~ exporting
+~colors: ColorScheme~ and ~weight~.  The orchestrator and all panels import from
+here.  (If a panel stream already created this, just consume it.)
+
+** DONE Create ~lox-visualizer.ts~ orchestrator skeleton
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts (new, from lox-visualizer-demo.ts)
+   :END:
+
+#+begin_src typescript
+class LoxVisualizer extends Component {
+    private dataStore = createStore<{ data: LoxData | null }>({ data: null });
+    private selection = createStore<VisualizerSelection>({ selectedStart: null, selectedAstNode: null });
+    private connectors: ConnectorLayer;
+    private panels: VisualizationPanel[];
+
+    constructor(private root: HTMLElement) {
+        const connectors = new ConnectorLayer(root);
+        // each panel gets (container, dataStore, selectionStore, connectors)
+        const lexer = new LexerPanel(root.querySelector('#lox-lexer')!,     dataStore, selection, connectors);
+        const ast   = new AstPanel(root.querySelector('#lox-ast')!,         dataStore, selection, connectors);
+        const bc    = new BytecodePanel(root.querySelector('#lox-compiler')!, dataStore, selection, connectors);
+        super([lexer, ast, bc]);
+        this.connectors = connectors;
+        this.panels = [lexer, ast, bc];
+
+        connectors.addLine('ast', 'lexer', colors.highlight);
+        connectors.addLine('ast', 'bc',    colors.highlight);
+    }
+    ...
+}
+#+end_src
+
+*Determine the root element.*  Today there is no single wrapping element — the
+post has sibling divs ~#lox-lexer~, ~#lox-ast~, ~#lox-compiler~, ~#lox-console~
+(~content/posts/cloxvis.md~ 45–51).  Options:
+- Use ~document.body~ (or ~document~) as the root and keep ~querySelector~ by id.
+- Add a wrapping ~<div id="lox-visualizer">~ in the post and pass that.
+Pick one; the connector overlay is viewport-fixed either way (see 02).  The
+former avoids touching the post markup.
+
+** DONE Wire WASM events → LoxState → data store
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+Port the event handlers from the demo ~setUp~ (74–115) unchanged in substance
+(they accumulate into ~LoxState~ via the ~d3.dispatch~ stream in ~lox-core~).
+Replace the ~render()~ method (demo 270–286): instead of calling
+~displayLex~/~drawAst~/~drawBytecode~ directly, derive *once* and publish to the
+data store.  Panels react via their subscriptions — no per-panel loop:
+
+#+begin_src typescript
+render() {
+    // reset selection first so panels clear highlights/anchors in the same pass
+    this.selection.set({ selectedStart: null, selectedAstNode: null });
+    // derive the whole snapshot and publish in one shot (no incremental writes)
+    this.dataStore.set({ data: deriveLoxData(this.loxState) });       // 03
+    this.displayConsole();
+}
+#+end_src
+
+This is the "set all the events when done aggregating" model: accumulation
+happens in the ~lox.events.on(...)~ handlers; the single ~dataStore.set~ fires
+only when a run has finished aggregating.
+
+Keep the existing render-trigger timing: the lexer ~TOKEN_EOF~ ⇒
+~requestAnimationFrame(render)~ and parser ~PROGRAM close~ ⇒
+~requestAnimationFrame(render)~ flags (~rendered~, ~parserRendered~; demo 84–111)
+stay in the orchestrator.
+
+** DONE Keep editor + rerun in the orchestrator
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+Port the CodeMirror setup, the Run button, ~getText~, ~rerun~, and
+~displayConsole~ verbatim (demo 117–146, 165–181, 288–297).  ~rerun~ keeps
+emptying the event arrays and re-running source; it should also reset the store
+selection (the ~render()~ reset above covers this once new events arrive).
+
+The console panel is intentionally still handled inline here (not yet a real
+panel) — leaving it as-is matches the architecture, which scopes the panel
+refactor to lexer/ast/bytecode.  A future ~ConsolePanel~ is out of scope.
+
+** DONE Replace global listeners with store-based clearing + connector refresh
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+- *resize/scroll*: replace ~resizeHandler~ (demo 53) with
+  ~() => this.connectors.refresh()~ plus, if panels need fresh rects, a pass
+  asking panels to re-publish anchors (see 02/04 open questions).  Register on
+  ~window~ ~resize~ and ~scroll~; remove in ~tearDown~ + ~connectors.destroy()~.
+- *click-outside-to-clear*: replace ~clickOutsideHandler~ (demo 54–58) with a
+  document click listener that, when the target is outside all panel
+  containers, does ~this.selection.set({ selectedStart: null, selectedAstNode: null })~.
+  All panels then clear via their ~onSelectionChange~.
+
+** DONE setUp / tearDown propagation
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+~setUp~ (async): create WASM, wire events + editor, then ~super.setUp()~ to
+propagate to panel children (each panel subscribes to the store + renders
+chrome).  ~tearDown~: ~super.tearDown()~ (panels unsubscribe), then
+~editorView.destroy()~, remove the run button, remove window/document listeners,
+and ~this.connectors.destroy()~.  This replaces the old manual
+~clearAllConnectors~ / ~clearSpanHighlight~ / ~clearBcHighlight~ calls
+(demo 153–163), which no longer exist on the orchestrator.
+
+** DONE Delete ~connector.ts~
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/connector.ts (delete)
+   :END:
+
+After the orchestrator and panels use ~ConnectorLayer~ exclusively, remove the
+old singleton module.  Grep for ~drawConnector~, ~clearConnector~,
+~clearAllConnectors~ to ensure no references remain.
+
+** DONE Update the build entry
+   :PROPERTIES:
+   :files:    vite.config.js
+   :END:
+
+Change the rollup input key + path from
+~app/src/lox-visualizer/lox-visualizer-demo.ts~ to
+~app/src/lox-visualizer/lox-visualizer.ts~ (vite.config.js line 19).  The output
+~entryFileNames: '[name].js'~ means the emitted path changes to
+~lox-visualizer/lox-visualizer.js~ — update the post accordingly (next task).
+Alternatively keep the input *key* as the old name to avoid changing the post;
+decide and keep both in sync.
+
+** DONE Update the post script tag
+   :PROPERTIES:
+   :files:    content/posts/cloxvis.md
+   :END:
+
+Update the module script src (cloxvis.md line 28) from
+~/app/lox-visualizer/lox-visualizer-demo.js~ to the new emitted path
+(~/app/lox-visualizer/lox-visualizer.js~), matching whatever key 'Update the
+build entry' settles on.  No other markup changes are required — the panel divs
+stay (architecture: HTML structure does not change).  If a wrapping
+~#lox-visualizer~ root was chosen, add it here.
+
+** DONE Instantiate the orchestrator
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/lox-visualizer.ts
+   :END:
+
+Replace the demo's bare ~const app = new LoxVisualizer();~ (demo 322) with one
+that passes the chosen root, e.g.
+~const app = new LoxVisualizer(document.body);~ (or the wrapper element).  Note:
+if the lifecycle change makes ~setUp~ no longer auto-run from the constructor,
+call ~app.setUp()~ explicitly here (it is ~async~).
+
+** DONE Update / migrate references in tests
+   :PROPERTIES:
+   :files:    app/src/lox-visualizer/state/state.test.ts (+ any new tests)
+   :END:
+
+~state.test.ts~ imports from ~state/state~ only (no demo import) so it is
+unaffected by the rename — just re-run it to confirm parse behavior is
+unchanged after any ~LoxState~ type tweaks from 03.  Ensure the new unit tests
+(store: 01; connector geometry: 02) are picked up by vitest (root is
+~app/src~ per vite.config.js).
+
+** DONE Full verification pass
+   :PROPERTIES:
+   :files:    (whole feature)
+   :END:
+
+- ~npm run build~ (vite) succeeds with the new entry.
+- ~npx tsc --noEmit~ / the project's typecheck is clean.
+- ~npm test~ (vitest) passes, including new store/connector tests.
+- Manual: in the rendered post, verify all original interactions still work:
+  click a lexer token → AST focuses + subtree spans highlight + ast↔lexer line;
+  click an AST node → lexer subtree highlights + line; click a bytecode row →
+  AST focuses + ast↔bc line (and now lexer highlight); click-away clears
+  everything; resize/scroll keeps lines attached; re-run rebuilds cleanly.
+- Confirm two ~LoxVisualizer~ instances on one page no longer collide (the
+  original ~connector.ts~ singleton bug) — even if the site never does this, a
+  quick scratch test validates the scoped-layer goal.
+
+* Open questions
+
+- *Root element*: ~document.body~ vs a new wrapper div.  Wrapper is cleaner for
+  future multi-instance + scoped overlay, but touches the post.  Body is
+  zero-markup-change.  Decide here since the orchestrator constructor signature
+  depends on it.
+- *Entry rename vs key alias*: renaming the rollup input key changes the emitted
+  filename and forces the post update; keeping the key avoids it.  Either is
+  fine — just keep vite.config.js and cloxvis.md consistent.
+- *Console as a panel*: deferred.  If desired later, it slots into the same
+  ~VisualizationPanel~ + ~children~ machinery with no orchestrator changes.
