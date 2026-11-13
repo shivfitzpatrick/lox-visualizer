@@ -62,8 +62,19 @@ export async function createLox(userConfig: CreateLoxConfig = {}) {
 
     const events = raw as unknown as LoxEvents;
 
+    // The Emscripten glue lives in public/ and is copied as-is: it is handed
+    // the wasm binary's URL at runtime (see locateFile below), so it has to
+    // stay a plain runtime import rather than a module the bundler rewrites.
+    // Vite refuses to pull anything under public/ into the module graph, and
+    // in dev it appends ?import to any dynamic import whose specifier starts
+    // with "." or "/" — which runs into that same refusal. Resolving to an
+    // absolute URL avoids both: Vite leaves non-relative specifiers alone, so
+    // the browser imports the file straight from the dev server, and from the
+    // copied public/ directory in a build. @vite-ignore stops the build from
+    // trying to resolve it.
+    const moduleUrl = new URL(config.modulePath, import.meta.url).href;
     const { default: createLoxWasm } = (await import(
-        '/js/lox-visualizer/lox.js'
+        /* @vite-ignore */ moduleUrl
     )) as { default: CreateLoxWasm };
 
     const loxModule = await createLoxWasm({

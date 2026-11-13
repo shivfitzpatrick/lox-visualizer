@@ -10,8 +10,7 @@
 	"skipLibCheck": true,
 	"target": "ESNext",
 	"paths": {
-	    "@/*": ["./src/*"],
-	    "/js/lox-visualizer/lox.js": ["./src/types/lox-wasm-stub.ts"]
+	    "@/*": ["./src/*"]
 	},
 	"lib": ["ESNext", "DOM", "DOM.Iterable"]
     },

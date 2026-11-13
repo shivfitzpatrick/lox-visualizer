@@ -8,15 +8,6 @@ export default defineConfig(({ mode }) => ({
   test: {
     root: resolve(__dirname, 'src'),
     globals: true,
-
-    alias: {
-      // lox-core imports this as a URL: Vite serves public/ at the site root,
-      // and the build marks it external (see rollupOptions below), so nothing
-      // ever resolves it on disk. Point it at the real glue so importing
-      // lox-core under vitest works — the module only defines a factory, and
-      // tests fake createLox rather than instantiating the WASM.
-      '/js/lox-visualizer/lox.js': resolve(__dirname, 'public/js/lox-visualizer/lox.js'),
-    },
   },
 
   build: {
@@ -31,8 +22,9 @@ export default defineConfig(({ mode }) => ({
 
       // The pyodide entry is dead while the python-visualizer is unbuilt, but
       // it is the setting that keeps the CDN import out of the bundle when it
-      // comes back.
-      external: ['/js/lox-visualizer/lox.js', /^https:\/\/cdn\.jsdelivr\.net\/pyodide\//],
+      // comes back. The Emscripten glue needs no entry here: lox-core imports
+      // it by absolute URL at runtime, so it never enters the module graph.
+      external: [/^https:\/\/cdn\.jsdelivr\.net\/pyodide\//],
     },
   },
 
