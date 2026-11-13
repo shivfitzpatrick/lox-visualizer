@@ -74,8 +74,24 @@ adapter hands it. `src/lox-visualizer/` is that adapter for Lox, and
 typechecked and tested, but deliberately not imported by `src/index.ts`, so it
 stays out of the bundle.
 
+## License
+
+Copyright (C) 2026 Siobhan Fitzpatrick.
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details — a
+copy is in [`LICENSE`](LICENSE), and it is also at
+<https://www.gnu.org/licenses/>.
+
 ## Credits
 
 clox and the Lox language are from *Crafting Interpreters* by Robert Nystrom.
 The bundled fonts (Barlow, JetBrains Mono) are under the SIL Open Font License
-— see `public/font/OFL.txt`.
+— see `public/font/OFL.txt`; they are aggregated with this program, not covered
+by its license.

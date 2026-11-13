@@ -2,6 +2,7 @@
   "name": "lox-visualizer",
   "version": "0.1.0",
   "private": true,
+  "license": "GPL-3.0-or-later",
   "description": "Interactive visualizer for the clox bytecode VM: lexing, parsing, compilation and execution, step by step.",
   "type": "module",
   "scripts": {
