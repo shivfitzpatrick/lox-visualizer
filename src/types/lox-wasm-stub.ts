@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Siobhan Fitzpatrick
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 /** TypeScript resolution stub for the Emscripten bundle (runtime URL is external in Vite). */
 
 interface LoxWasmOptions {

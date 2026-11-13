@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Siobhan Fitzpatrick
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Source-position convention: all start/srcOffset values are UTF-16 code unit
 // offsets into the editor document string (JavaScript String indexing).
 // Language adapters must flatten native spans to this convention before

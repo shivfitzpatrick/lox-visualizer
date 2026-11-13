@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Siobhan Fitzpatrick
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import { assert } from 'chai';
 import { findNodeForOffset, adjacentNode } from '@/compiler-viz/ast';
 import type { AstNode } from '@/compiler-viz/ast';

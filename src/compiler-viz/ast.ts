@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Siobhan Fitzpatrick
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import { drag, hierarchy, tree, zoom, zoomIdentity, ZoomTransform, zoomTransform as getZoomTransform, interpolateNumber, select } from 'd3';
 import type { HierarchyNode } from 'd3-hierarchy';
 import { selectionNode, type PanelSelection } from '@/compiler-viz/d3-utils';

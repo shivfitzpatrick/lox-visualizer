@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Siobhan Fitzpatrick
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import { assert } from 'chai';
 import { DEFAULT_SAMPLE_LABEL, defaultSample, loxSamples } from '@/lox-visualizer/samples';
 

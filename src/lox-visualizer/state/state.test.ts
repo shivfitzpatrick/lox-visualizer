@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Siobhan Fitzpatrick
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import { assert } from 'chai';
 import { TokenCategory } from '@/lox-visualizer/state/token';
 import { LoxState, NODE_TYPE, CHILD_TYPE } from '@/lox-visualizer/state/state';

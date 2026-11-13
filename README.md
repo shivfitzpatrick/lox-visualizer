@@ -4,11 +4,12 @@ An interactive view of how a Lox program is lexed, parsed, compiled to
 bytecode, and executed — side by side, with the four representations linked to
 each other.
 
-The interpreter underneath is [clox](https://craftinginterpreters.com/), the
-bytecode VM from Robert Nystrom's *Crafting Interpreters*, compiled to
-WebAssembly and instrumented to emit an event for each lexer token, AST node,
-bytecode instruction and VM step. The front end is TypeScript + d3 +
-CodeMirror, with no framework.
+The interpreter underneath is clox, the bytecode VM from Robert Nystrom's
+*Crafting Interpreters*, compiled to WebAssembly and instrumented to emit an
+event for each lexer token, AST node, bytecode instruction and VM step. That C
+source lives in its own repo —
+[shivfitzpatrick/clox](https://github.com/shivfitzpatrick/clox), MIT licensed.
+The front end is TypeScript + d3 + CodeMirror, with no framework.
 
 ## What you can do with it
 
@@ -44,9 +45,10 @@ The `Makefile` wraps the same targets (`make dev`, `make build`, `make test`,
 
 ### Rebuilding the WASM module
 
-The WASM module is built from a separate clox checkout — the instrumentation
-that feeds the visualizer lives in that C source, not here. With the checkout
-in place:
+The WASM module is built from
+[shivfitzpatrick/clox](https://github.com/shivfitzpatrick/clox) — the
+instrumentation that feeds the visualizer lives in that C source, not here.
+With a checkout of it in place:
 
 ```sh
 make wasm LOX_PROJECT=/path/to/clox
@@ -92,6 +94,12 @@ copy is in [`LICENSE`](LICENSE), and it is also at
 ## Credits
 
 clox and the Lox language are from *Crafting Interpreters* by Robert Nystrom.
-The bundled fonts (Barlow, JetBrains Mono) are under the SIL Open Font License
-— see `public/font/OFL.txt`; they are aggregated with this program, not covered
-by its license.
+
+Two things shipped here are aggregated with this program rather than covered by
+its license:
+
+- `public/js/lox-visualizer/{lox.js,lox.wasm}` — compiled output of
+  [shivfitzpatrick/clox](https://github.com/shivfitzpatrick/clox), MIT
+  licensed; its source is in that repo.
+- `public/font/` — Barlow and JetBrains Mono, under the SIL Open Font License;
+  see `public/font/OFL.txt`.

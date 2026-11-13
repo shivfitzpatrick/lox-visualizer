@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Siobhan Fitzpatrick
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import * as d3 from 'd3';
 import type { CompilerEvent, LexerEvent, ParserEvent, PrintEvent } from '@/lox-visualizer/events';
 import type { VmStep } from '@/compiler-viz/execution';

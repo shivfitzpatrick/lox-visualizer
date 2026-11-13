@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Siobhan Fitzpatrick
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import { createLox } from '@/lox-visualizer/lox-core';
 import { Component } from '@/lib/component';
 import { setupStyles } from '@/lib/styles';

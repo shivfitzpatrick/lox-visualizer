@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Siobhan Fitzpatrick
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import { Component } from '@/lib/component';
 import { panelSelection } from '@/compiler-viz/d3-utils';
 import type { Store } from '@/lib/store';

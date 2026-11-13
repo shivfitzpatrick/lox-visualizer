@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Siobhan Fitzpatrick
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 # Path to the clox checkout that builds the WASM module. Override on the
 # command line or in the environment if yours lives elsewhere:
 #   make wasm LOX_PROJECT=/path/to/clox

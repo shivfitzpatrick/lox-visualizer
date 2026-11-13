@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Siobhan Fitzpatrick
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import { ColorScheme, TokenCategory } from '@/lox-visualizer/state/token';
 
 const baseColors = {

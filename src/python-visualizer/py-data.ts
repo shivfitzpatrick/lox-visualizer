@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Siobhan Fitzpatrick
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Source position convention: all start/length values are UTF-16 code-unit
 // absolute offsets (JavaScript String indices) into the editor document.
 // The Python emitter must flatten (line, col) spans using a line-start table.

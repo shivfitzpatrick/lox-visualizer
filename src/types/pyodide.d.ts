@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Siobhan Fitzpatrick
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 declare module 'https://cdn.jsdelivr.net/pyodide/v0.27.5/full/pyodide.mjs' {
     export interface PyodideInterface {
         runPython(code: string): unknown;

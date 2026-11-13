@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Siobhan Fitzpatrick
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import { LoxVisualizer } from '@/lox-visualizer/lox-visualizer';
 import { defaultSample } from '@/lox-visualizer/samples';
 

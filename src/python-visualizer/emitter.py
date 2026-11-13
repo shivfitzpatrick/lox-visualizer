@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Siobhan Fitzpatrick
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Python visualizer emitter.
 
 Reads source from stdin, runs tokenize / ast / dis, and writes PyRawData JSON

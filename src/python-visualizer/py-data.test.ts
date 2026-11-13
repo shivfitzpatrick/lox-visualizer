@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Siobhan Fitzpatrick
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import { assert } from 'chai';
 import sampleFixture from '@/python-visualizer/fixtures/sample.json';
 import { deriveVizData, PYTHON_TOKEN_CATEGORY_MAP } from '@/python-visualizer/py-data';

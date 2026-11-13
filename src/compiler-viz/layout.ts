@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Siobhan Fitzpatrick
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import { Component } from '@/lib/component';
 import type { Store } from '@/lib/store';
 import type { ConnectorLayer } from '@/compiler-viz/connector-layer';

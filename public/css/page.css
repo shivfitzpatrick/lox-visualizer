@@ -1,3 +1,6 @@
+/* SPDX-FileCopyrightText: 2026 Siobhan Fitzpatrick */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+
 /* Page chrome for the standalone visualizer: the dark palette, fonts and
    container that the visualizer's own stylesheet assumes it is sitting on.
    The visualizer itself is styled by lox-visualizer.css. */

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Siobhan Fitzpatrick
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import { TokenCategory, TokenType } from '@/lox-visualizer/state/token';
 
 /** Maps a language-specific token type key to a highlight bucket. */

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Siobhan Fitzpatrick
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import { select, Selection } from 'd3';
 
 export type PanelSelection = Selection<any, unknown, HTMLElement, unknown>;

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Siobhan Fitzpatrick
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import { VisualizationPanel } from '@/compiler-viz/visualization-panel';
 import { drawBytecode } from '@/compiler-viz/bytecode';
 import { collectSubtreeStarts, type AstNode } from '@/compiler-viz/ast';

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Siobhan Fitzpatrick
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import type { PyRawData } from '@/python-visualizer/py-data';
 import emitterScript from '@/python-visualizer/emitter.py?raw';
 
